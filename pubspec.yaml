@@ -1,0 +1,13 @@
+name: deriv_multi_volatility
+version: 0.1.0+1
+description: Foreground-only Deriv five-market trading prototype
+publish_to: none
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  web_socket_channel: ^3.0.1
+  flutter_secure_storage: ^9.2.4
+flutter:
+  uses-material-design: true
