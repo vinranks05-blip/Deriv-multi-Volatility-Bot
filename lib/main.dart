@@ -154,7 +154,7 @@ class _TradingScreenState extends State<TradingScreen> with WidgetsBindingObserv
     if (real && auto) {
       final confirm = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
         title: const Text('Start REAL automatic trading?'),
-        content: const Text('Up to 6 trades at $0.35 each. The session loss threshold is not a guaranteed maximum loss. Continue?'),
+        content: const Text('Up to 6 trades at \$0.35 each. The session loss threshold is not a guaranteed maximum loss. Continue?'),
         actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Confirm start'))]));
       if (confirm != true) return;
@@ -197,7 +197,7 @@ class _TradingScreenState extends State<TradingScreen> with WidgetsBindingObserv
     final chosen = best!;
     final confirm = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
       title: Text('${real ? 'REAL' : 'DEMO'} ${chosen.direction} on ${chosen.symbol}?'),
-      content: const Text('Buy one $0.35, 5-minute contract?'),
+      content: const Text('Buy one \$0.35, 5-minute contract?'),
       actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
         FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Buy'))]));
     if (confirm != true) return;
