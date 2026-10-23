@@ -1,1 +1,2 @@
-lib/main.dart
+main.dart
+lib
