@@ -17,13 +17,19 @@ void main() {
 }
 
 class Candidate {
-class Candidate {
   final String symbol, direction;
   final double score;
   final int epoch;
-  Candidate(this.symbol, this.direction, this.score, this.epoch);
+
+  Candidate(
+    this.symbol,
+    this.direction,
+    this.score,
+    this.epoch,
+  );
+}
+
 class DerivClient {
-  WebSocketChannel? _channel;
   StreamSubscription? _sub;
   int _req = 0;
   final Map<int, Completer<Map<String, dynamic>>> _pending = {};
