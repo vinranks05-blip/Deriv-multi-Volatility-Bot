@@ -30,7 +30,7 @@ class Candidate {
 }
 
 class DerivClient {
-  StreamSubscription? _sub;
+  StreamSubscription? _sub;WebSocketChannel? _channel;
   int _req = 0;
   final Map<int, Completer<Map<String, dynamic>>> _pending = {};
   Future<void> connect(String appId) async {
