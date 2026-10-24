@@ -6,7 +6,25 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:http/http.dart' as http;import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:http/http.dart' as http;
+
+void main() {
+  runApp(
+    const MaterialApp(
+      home: TradingScreen(),
+      debugShowCheckedModeBanner: false,
+    ),
+  );
+}
+
+class Candidate {
 class Candidate {
   final String symbol, direction;
   final double score;
