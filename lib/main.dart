@@ -4,7 +4,11 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+// Line 6
+import 'package:web_socket_channel/web_socket_channel.dart';
 
+// Line 7
+import 'package:http/http.dart' as http;
 void main() => runApp(const MaterialApp(home: TradingScreen(), debugShowCheckedModeBanner: false));
 
 class Candidate {
