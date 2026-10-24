@@ -1,12 +1,4 @@
-
 import 'dart:async';
-import 'dart:convert';
-import 'dart:math';
-
-import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:http/http.dart' as http;import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -30,8 +22,6 @@ class Candidate {
   final double score;
   final int epoch;
   Candidate(this.symbol, this.direction, this.score, this.epoch);
-}
-
 class DerivClient {
   WebSocketChannel? _channel;
   StreamSubscription? _sub;
