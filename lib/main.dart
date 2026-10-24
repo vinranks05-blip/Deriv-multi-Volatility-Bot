@@ -125,7 +125,9 @@ class _TradingScreenState extends State<TradingScreen> with WidgetsBindingObserv
     if (connected) return;
     try {
       final id = appIdController.text.trim(), token = tokenController.text.trim();
-      if (!RegExp(r'^\d+$').hasMatch(id) || token.isEmpty) throw StateError('Enter an app ID and API token');
+      if (id.isEmpty || token.isEmpty) {
+  throw StateError('Enter a valid Deriv App ID and API token');
+      }
       await storage.write(key: 'appId', value: id);
       await storage.write(key: 'demoToken', value: token);
       final c = DerivClient(); await c.connect(id);
