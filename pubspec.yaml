@@ -4,7 +4,7 @@ description: Foreground-only Deriv five-market trading prototype
 publish_to: none
 environment:
   sdk: '>=3.3.0 <4.0.0'
-dependencies:
+dependencies:http: ^1.3.0
   flutter:
     sdk: flutter
   web_socket_channel: ^3.0.1
