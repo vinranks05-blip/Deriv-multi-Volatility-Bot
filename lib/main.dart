@@ -274,4 +274,6 @@ class _TradingScreenState extends State<TradingScreen> with WidgetsBindingObserv
       for (final s in symbols) Card(color: const Color(0xFF1D2A3D), child: ListTile(title: Text(s), subtitle: Text(marketStatus[s] ?? 'Waiting'),
         trailing: best?.symbol == s ? const Icon(Icons.star, color: Colors.amber) : null)),
       const Text('Prototype: not backtested or API-verified. Session limits reset on app restart. Android may suspend network activity when the app is backgrounded. Stop prevents new entries but cannot cancel purchased contracts.', style: TextStyle(color: Colors.orangeAccent)),
-    ])));
+        ])),
+  );
+}
