@@ -60,7 +60,12 @@ class DerivClient {
     try { return await c.future.timeout(const Duration(seconds: 20)); }
     finally { _pending.remove(id); }
   }
-  Future<void> close() async { await _sub?.cancel(); await _channel?.sink.close(); _channel = null; _failAll(StateError('Closed')); }
+  Future<void> close() async {
+  await _sub?.cancel();
+  await _channel?.sink.close();
+  _channel = null;
+  _failAll(StateError('Closed'));
+  }
 }
 
 double ema(List<double> values, int length) {
