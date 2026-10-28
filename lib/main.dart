@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 
@@ -30,6 +31,9 @@ class DerivApi {
   int _id = 0;
   bool online = false;
   void Function(String)? onLost;
+  // Trading is possible only over an OTP-authenticated demo socket.
+  bool get demoSocket => online;
+
 
   Future<String> connect(String appId, String token) async {
     await close();
@@ -204,6 +208,14 @@ class DigitSample {
   double pct(int n) => total==0 ? 0 : counts[n]*100/total;
 }
 
+class DemoTrade {
+  final String symbol, side, contractId;
+  final double stake;
+  String status='OPEN';
+  double profit=0;
+  DemoTrade(this.symbol,this.side,this.contractId,this.stake);
+}
+
 class LabHome extends StatefulWidget {
   const LabHome({super.key});
   @override
@@ -219,6 +231,14 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   final known = <String>{};
   final precision = <String,int>{};
   int page=0, interval=60, threshold=75, scans=0, generation=0, targetDigit=5;
+  bool autoTrade=false, orderBusy=false, unresolvedOrder=false;
+  int maxTrades=6, maxConsecutiveLosses=2, tradeCount=0, lossStreak=0;
+  double maxSessionLoss=1.00, sessionPnl=0;
+  String? activeContractId;
+  final List<DemoTrade> demoTrades=[];
+  final Set<String> tradedSignals={};
+  DateTime? lastOrderAt;
+
   String strategy='Even';
   double demoStake=0.35;
   bool connecting=false, scanning=false, refreshing=false;
@@ -226,21 +246,42 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   DateTime? updated;
   DigitSample? sample;
   Setup? best;
+  Timer? _digitTimer;
+  bool _pollingTick=false;
+  bool liveDigits=false;
+  final Queue<int> _recentDigits=Queue<int>();
+  int? _latestTickEpoch;
+  DateTime? _digitReceivedAt;
+  String? _digitError;
+  int get digitSecondsRemaining {
+    if (_digitReceivedAt==null || sample==null) return 0;
+    final elapsed=DateTime.now().difference(_digitReceivedAt!).inMilliseconds;
+    return (10-(elapsed/1000).floor()).clamp(0,10).toInt();
+  }
+  double get digitCountdownProgress {
+    if (_digitReceivedAt==null || sample==null) return 0;
+    final elapsed=DateTime.now().difference(_digitReceivedAt!).inMilliseconds;
+    return (1-elapsed/10000).clamp(0.0,1.0).toDouble();
+  }
+  bool get digitVisible => liveDigits && digitCountdownProgress>0 && sample!=null;
+
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    api.onLost = (reason) { stop(); if (mounted) setState(() { account=''; status=reason; }); };
+    api.onLost = (reason) { autoTrade=false; unresolvedOrder=activeContractId!=null || orderBusy; _stopLiveDigits(); stop(); if (mounted) setState(() { account=''; status=reason; }); };
   }
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed && scanning) stop('Paused in background');
+    if (state != AppLifecycleState.resumed) { _stopLiveDigits(); if (scanning) stop('Paused in background'); }
   }
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     generation++;
+    autoTrade=false;
+    _stopLiveDigits();
     api.close();
     appId.dispose(); token.dispose();
     super.dispose();
@@ -307,6 +348,8 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     throw StateError('Quote precision missing from API. Cannot safely calculate last digits.');
   }
   Future<void> disconnect() async {
+    autoTrade=false;
+    _stopLiveDigits();
     stop();
     await api.close();
     if (mounted) setState(() { account=''; status='Disconnected'; sample=null; });
@@ -356,6 +399,12 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       await checkOutcomes(run);
       if (!mounted || run!=generation) break;
       setState(() { best=found.isEmpty?null:found.first; scans++; updated=DateTime.now(); status=found.isEmpty?'Scan completed • no qualifying setup':'Best: ${found.first.symbol} ${found.first.direction}'; });
+      if (autoTrade && best!=null && canTrade) {
+        // Only act on the latest closed candle, never a stale recommendation.
+        final signal=best!;
+        final now=DateTime.now().millisecondsSinceEpoch~/1000;
+        if(now-signal.epoch<120) await executeDemo(signal);
+      }
       for (var i=0;i<interval && scanning && run==generation;i++) { await Future.delayed(const Duration(seconds:1)); }
     }
     if (mounted && run==generation) setState(() => scanning=false);
@@ -378,8 +427,202 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       } catch (_) {}
     }
   }
+
+  bool get canTrade => api.online && !orderBusy && !unresolvedOrder &&
+      activeContractId==null && tradeCount<maxTrades &&
+      lossStreak<maxConsecutiveLosses && sessionPnl > -maxSessionLoss &&
+      (lastOrderAt==null || DateTime.now().difference(lastOrderAt!).inSeconds>=300);
+
+  Future<void> reviewTrade(Setup signal) async {
+    if(!canTrade) { note('Trade unavailable: connection, open contract or risk limit'); return; }
+    final approved=await showDialog<bool>(context:context,builder:(ctx)=>AlertDialog(
+      title:const Text('Approve DEMO trade'),
+      content:Text('${signal.symbol} ${signal.direction}\n'
+        'Stake: \$${demoStake.toStringAsFixed(2)}\nDuration: 5 minutes\n'
+        'Indicator agreement: ${signal.score.toStringAsFixed(0)}/100\n\n'
+        'This will purchase a contract using virtual demo funds.'),
+      actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('CANCEL')),
+        FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('BUY DEMO'))],
+    ));
+    if(approved==true) await executeDemo(signal);
+  }
+
+  Future<void> executeDemo(Setup signal) async {
+    if(!canTrade) {note('Trade blocked by risk or open-contract protection');return;}
+    final now=DateTime.now().millisecondsSinceEpoch~/1000;
+    if(now-signal.epoch>=180 || now<signal.epoch) {note('Signal expired');return;}
+    final key='${signal.symbol}:${signal.epoch}:${signal.direction}';
+    if(!tradedSignals.add(key)) {note('Already traded this candle');return;}
+    setState(() {orderBusy=true;status='Requesting demo contract proposal…';});
+    var buyAttempted=false;
+    try {
+      // CALL/PUT are Rise/Fall contract types; broker validates availability.
+      final proposal=await api.request({
+        'proposal':1,'amount':double.parse(demoStake.toStringAsFixed(2)),
+        'basis':'stake','contract_type':signal.direction,
+        'currency':'USD','duration':5,'duration_unit':'m',
+        'underlying_symbol':signal.symbol,
+      });
+      final offer=proposal['proposal'];
+      if(offer is! Map) throw StateError('No valid proposal from broker');
+      final proposalId=offer['id']?.toString();
+      final ask=double.tryParse('${offer['ask_price']}');
+      if(proposalId==null || proposalId.isEmpty || ask==null || ask<=0 || ask>demoStake+0.011) {
+        throw StateError('Proposal missing or price exceeds configured stake');
+      }
+      if(!mounted || !api.online) throw StateError('Disconnected before purchase');
+      // Lock before sending: a timed-out buy may still have succeeded.
+      buyAttempted=true;
+      unresolvedOrder=true;
+      final bought=await api.request({'buy':proposalId,'price':ask});
+      final details=bought['buy'];
+      if(details is! Map || details['contract_id']==null) {
+        throw StateError('Buy response has no contract ID; verify account before retrying');
+      }
+      final id='${details['contract_id']}';
+      final trade=DemoTrade(signal.symbol,signal.direction,id,ask);
+      demoTrades.insert(0,trade);
+      activeContractId=id;
+      unresolvedOrder=false;
+      tradeCount++;
+      lastOrderAt=DateTime.now();
+      note('DEMO contract $id purchased • monitoring settlement');
+      // Poll until broker reports settlement; don't submit another trade while open.
+      unawaited(monitorContract(trade));
+    } catch(e) {
+      if(buyAttempted) {
+        autoTrade=false;
+        note('BUY STATUS UNCERTAIN: $e. Auto OFF. Check Deriv account before reset.');
+      } else {
+        note('Demo proposal rejected: $e');
+      }
+    } finally {
+      if(mounted) setState(()=>orderBusy=false);
+    }
+  }
+
+  Future<void> monitorContract(DemoTrade trade) async {
+    // The app must remain in foreground for settlement polling.
+    while(mounted && api.online && activeContractId==trade.contractId) {
+      try {
+        final reply=await api.request({
+          'proposal_open_contract':1,
+          'contract_id':int.parse(trade.contractId),
+        });
+        final c=reply['proposal_open_contract'];
+        if(c is! Map) throw StateError('Missing contract status');
+        final sold=c['is_sold']==1 || c['is_sold']==true ||
+          ['won','lost','sold'].contains('${c['status']}'.toLowerCase());
+        if(sold) {
+          final pnl=double.tryParse('${c['profit']}');
+          if(pnl==null) throw StateError('Settlement profit unavailable');
+          trade.profit=pnl;
+          trade.status=pnl>0?'WIN':pnl<0?'LOSS':'DRAW';
+          sessionPnl+=pnl;
+          lossStreak=pnl<0?lossStreak+1:0;
+          activeContractId=null;
+          if(lossStreak>=maxConsecutiveLosses || sessionPnl<=-maxSessionLoss || tradeCount>=maxTrades) {
+            autoTrade=false;
+          }
+          note('DEMO ${trade.status} • P/L \$${pnl.toStringAsFixed(2)}');
+          return;
+        }
+      } catch(e) {
+        // A missing status must never unlock a potentially open contract.
+        note('Settlement check pending: $e');
+      }
+      await Future.delayed(const Duration(seconds:5));
+    }
+    if(activeContractId==trade.contractId) {
+      autoTrade=false;
+      unresolvedOrder=true;
+      note('Contract status unresolved. Check demo account before new trades.');
+    }
+  }
+
+  Future<void> confirmReconciled() async {
+    if(!api.online || orderBusy) return;
+    final confirm=await showDialog<bool>(context:context,builder:(ctx)=>AlertDialog(
+      title:const Text('Reconcile demo account'),
+      content:const Text('Only reset after checking your Deriv demo portfolio and confirming no open or unrecorded contracts. Risk counters remain unchanged.'),
+      actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('CANCEL')),
+        FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('I VERIFIED'))],
+    ));
+    if(confirm==true && mounted) setState(() {
+      activeContractId=null;unresolvedOrder=false;autoTrade=false;
+      status='Reconciled manually • automatic mode remains OFF';
+    });
+  }
+
+  void _stopLiveDigits() {
+    liveDigits=false;
+    _digitTimer?.cancel();
+    _digitTimer=null;
+    _digitReceivedAt=null;
+    _latestTickEpoch=null;
+  }
+
+  void _changeDigitMarket(String market) {
+    _stopLiveDigits();
+    setState(() {selected=market;sample=null;_recentDigits.clear();_digitError=null;});
+  }
+
+  int? _digitFromPrice(dynamic raw,int places) {
+    final n=double.tryParse('$raw');
+    if(n==null || !n.isFinite) return null;
+    final formatted=n.toStringAsFixed(places);
+    return int.tryParse(formatted.substring(formatted.length-1));
+  }
+
+  // Poll the latest quote every two seconds. New quotes replace the old
+  // digit immediately; the ten-second timer is only a display expiry.
+  Future<void> _pollLatestDigit() async {
+    if(!mounted || !liveDigits || !api.online || _pollingTick || sample==null) return;
+    _pollingTick=true;
+    final symbol=selected;
+    try {
+      final response=await api.request({'ticks':symbol});
+      final raw=response['tick'];
+      if(raw is! Map || !mounted || !liveDigits || selected!=symbol) return;
+      final epoch=int.tryParse('${raw['epoch']}');
+      final quote=raw['quote'];
+      if(epoch==null || quote==null) return;
+      final places=_precisionValue(raw['pip_size']) ?? precision[symbol] ?? sample!.precision;
+      final digit=_digitFromPrice(quote,places);
+      if(digit==null) return;
+      if(_latestTickEpoch!=null && epoch<=_latestTickEpoch!) return;
+      _latestTickEpoch=epoch;
+      _recentDigits.addLast(digit);
+      while(_recentDigits.length>1000) { _recentDigits.removeFirst(); }
+      final counts=List<int>.filled(10,0);
+      for(final n in _recentDigits) { counts[n]++; }
+      setState(() {
+        sample=DigitSample(counts,digit,places,_recentDigits.length);
+        _digitReceivedAt=DateTime.now();
+        _digitError=null;
+      });
+    } catch(e) {
+      if(mounted && liveDigits) setState(()=>_digitError='Live quote update failed. Retrying…');
+    } finally { _pollingTick=false; }
+  }
+
+  void _startLiveDigits() {
+    if(!api.online || sample==null) return;
+    _digitTimer?.cancel();
+    liveDigits=true;
+    _digitReceivedAt=DateTime.now();
+    _digitTimer=Timer.periodic(const Duration(milliseconds:250),(timer) {
+      if(!mounted || !api.online || !liveDigits) {timer.cancel();return;}
+      if(timer.tick%8==0) { _pollLatestDigit(); }
+      if(mounted && page==2) setState(() {});
+    });
+    _pollLatestDigit();
+  }
+
   Future<void> ticks() async {
     if (!api.online || refreshing) { note('Connect demo first'); return; }
+    _stopLiveDigits();
+    final requestedMarket=selected;
     setState(() { refreshing=true; sample=null; status='Loading live tick history…'; });
     try {
       final response=await api.request({'ticks_history':selected,'end':'latest','style':'ticks','count':1000});
@@ -389,16 +632,17 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       final places=await resolvePrecision(selected,response);
       final counts=List<int>.filled(10,0);
       var total=0, last=0;
+      _recentDigits.clear();
       for (final price in raw) {
-        final n=double.tryParse('$price');
-        if (n==null || !n.isFinite) continue;
-        final formatted=n.toStringAsFixed(places);
-        final digit=int.tryParse(formatted.substring(formatted.length-1));
+        final digit=_digitFromPrice(price,places);
         if (digit==null) continue;
         counts[digit]++; last=digit; total++;
+        _recentDigits.addLast(digit);
       }
       if (total==0) throw StateError('No valid ticks returned');
-      if (mounted) setState(() { sample=DigitSample(counts,last,places,total); status='Loaded $total $selected ticks'; });
+      if (!mounted || selected!=requestedMarket || !api.online) return;
+      setState(() { sample=DigitSample(counts,last,places,total); status='Loaded $total $selected ticks • live updates enabled'; });
+      _startLiveDigits();
     } catch (e) { note('Tick analysis failed: $e'); }
     finally { if (mounted) setState(() => refreshing=false); }
   }
@@ -415,7 +659,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     panel('Trading overview',Wrap(spacing:12,runSpacing:8,children:[
       Chip(avatar:const Icon(Icons.sensors,size:18),label:Text('Markets: ${markets.length}')),
       Chip(avatar:const Icon(Icons.analytics,size:18),label:Text('Signals: ${history.length}')),
-      Chip(avatar:const Icon(Icons.shield_outlined,size:18),label:const Text('DEMO • SIGNALS ONLY')),
+      Chip(avatar:const Icon(Icons.shield_outlined,size:18),label:const Text('DEMO • TRADING ENABLED')),
     ])),
     panel('Connection',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
       TextField(controller:appId,decoration:const InputDecoration(labelText:'Deriv App ID')),
@@ -426,7 +670,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       ]),if (account.isNotEmpty) label('Demo account: $account'),
     ])),
     panel('Market scanner',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      label('Five markets • closed 1-minute candles • no orders placed'),
+      label('Five markets • closed 1-minute candles • demo trades only'),
       const SizedBox(height:10),Wrap(spacing:8,children:[
         FilledButton.icon(onPressed:api.online&&!scanning?scan:null,icon:const Icon(Icons.play_arrow),label:const Text('Start scan')),
         OutlinedButton.icon(onPressed:scanning?()=>stop():null,icon:const Icon(Icons.stop),label:const Text('Stop')),
@@ -440,16 +684,18 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     panel('Recommended trade • manual approval',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
       Text(best==null?'Waiting for a qualified signal':'${best!.symbol} ${best!.direction} • ${best!.score.toStringAsFixed(0)}/100 agreement',style:const TextStyle(fontWeight:FontWeight.bold)),
       const SizedBox(height:8),
-      FilledButton.icon(onPressed:best==null?null:()=>showDialog<void>(context:context,builder:(ctx)=>AlertDialog(
-        title:const Text('Demo trade review'),
-        content:Text('Market: ${best!.symbol}\nDirection: ${best!.direction}\nIndicator agreement: ${best!.score.toStringAsFixed(0)}/100\nSuggested stake: \$${demoStake.toStringAsFixed(2)}\n\nOrder execution remains locked pending API and risk-control validation.'),
-        actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('CLOSE'))],
-      )),icon:const Icon(Icons.verified_user_outlined),label:const Text('Review demo trade')),
-      const Text('Order execution locked until API checks are validated.',style:TextStyle(color:Colors.deepOrange)),
+      FilledButton.icon(onPressed:best==null || !canTrade?null:()=>reviewTrade(best!),
+        icon:const Icon(Icons.verified_user_outlined),label:const Text('Review & buy DEMO contract')),
+      label('5-minute Rise/Fall • actual demo orders • never real money'),
+    ])),
+    panel('Demo trading performance',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      Text('Trades: $tradeCount / $maxTrades • P/L: \$${sessionPnl.toStringAsFixed(2)}'),
+      Text('Loss streak: $lossStreak • Open: ${activeContractId??'None'}'),
+      Text(unresolvedOrder?'TRADING LOCKED: reconcile demo account':'Auto mode: ${autoTrade?'ON':'OFF'}'),
     ])),
     panel('Live market radar',Column(children:markets.map((m)=>ListTile(dense:true,contentPadding:EdgeInsets.zero,title:Text(m,style:const TextStyle(fontWeight:FontWeight.bold)),subtitle:Text(statuses[m]??'Not scanned'))).toList())),
     panel('Digit analysis',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      DropdownButton<String>(isExpanded:true,value:selected,items:markets.map((m)=>DropdownMenuItem(value:m,child:Text(m))).toList(),onChanged:(m){if(m!=null)setState(() {selected=m;sample=null;});}),
+      DropdownButton<String>(isExpanded:true,value:selected,items:markets.map((m)=>DropdownMenuItem(value:m,child:Text(m))).toList(),onChanged:(m){if(m!=null)_changeDigitMarket(m);}),
       FilledButton.tonalIcon(onPressed:api.online&&!refreshing?ticks:null,icon:const Icon(Icons.refresh),label:Text(refreshing?'Loading…':'Load 1,000 live ticks')),
       const SizedBox(height:12),digitGrid(),
     ])),
@@ -468,7 +714,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   }
   Widget analyzer() => Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
     panel('Market & strategy',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      DropdownButton<String>(value:selected,isExpanded:true,items:markets.map((m)=>DropdownMenuItem(value:m,child:Text(m))).toList(),onChanged:(m){if(m!=null)setState((){selected=m;sample=null;});}),
+      DropdownButton<String>(value:selected,isExpanded:true,items:markets.map((m)=>DropdownMenuItem(value:m,child:Text(m))).toList(),onChanged:(m){if(m!=null)_changeDigitMarket(m);}),
       GridView.count(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),crossAxisCount:2,mainAxisSpacing:8,crossAxisSpacing:8,childAspectRatio:2.9,
         children:['Even','Odd','Over','Under'].map((s)=>FilledButton(
           style:FilledButton.styleFrom(backgroundColor:s=='Even'?const Color(0xFF1659E9):s=='Odd'?purple:s=='Over'?const Color(0xFF11A365):const Color(0xFFE62C34),
@@ -483,8 +729,12 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     ])),
     panel('Live Analysis',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
       Center(child:Text(selected,style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold))),
-      const SizedBox(height:8),Center(child:Text(sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:36,color:purple,fontWeight:FontWeight.bold))),
-      Center(child:Text(sample==null?'Load live ticks to begin analysis':'${sample!.total} recent ticks • last observed digit')),
+      const SizedBox(height:14),Center(child:digitDial()),
+      const SizedBox(height:8),Center(child:Text(sample==null?'Load 1,000 ticks to begin':
+        digitVisible?'New market tick replaces this digit immediately':
+        'No new tick in 10 seconds • waiting for the next quote',textAlign:TextAlign.center)),
+      if(_digitError!=null)...[const SizedBox(height:8),Center(child:label(_digitError!))],
+      if(sample!=null) Center(child:label('${sample!.total} recent ticks • last observed digit')), 
       const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&!refreshing?ticks:null,icon:const Icon(Icons.refresh),label:Text(refreshing?'Loading…':'Live ticks • refresh')),
     ])),
     panel('AI Market Analyzer • rule-based',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
@@ -495,10 +745,10 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
         'Observed ${sample!.total} ticks. ${strategy=='Even'? 'Even':strategy=='Odd'?'Odd':strategy} is descriptive, not a prediction.'),
       const SizedBox(height:14),Row(mainAxisAlignment:MainAxisAlignment.spaceEvenly,children:[
         FilledButton.tonal(onPressed:()=>setState(()=>strategy='Matches'),child:const Text('Matches')),
-        CircleAvatar(radius:39,backgroundColor:purple,child:Text(sample==null?'—':'${sample!.last}',style:const TextStyle(color:Colors.white,fontSize:30,fontWeight:FontWeight.bold))),
+        CircleAvatar(radius:39,backgroundColor:digitVisible && sample!.last.isEven?const Color(0xFF159F70):purple,child:Text(digitVisible?'${sample!.last}':'—',style:const TextStyle(color:Colors.white,fontSize:30,fontWeight:FontWeight.bold))),
         FilledButton.tonal(onPressed:()=>setState(()=>strategy='Differs'),child:const Text('Differs')),
       ]),
-      const SizedBox(height:6),Center(child:label('Last observed digit • not a prediction')),
+      const SizedBox(height:6),Center(child:label('Latest observed digit • 10-second expiry • not a prediction')),
     ])),
     panel('Number Distribution Percentages',digitGrid()),
     panel('Strategy statistics',Builder(builder:(context){
@@ -520,7 +770,34 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     })),
   ]);
 
-  Widget signalHistory() => history.isEmpty?panel('Signal history',const Text('No qualified signals yet. Start the scanner on the Dashboard.')):Column(children:[
+  Widget digitDial() {
+    final visible=digitVisible;
+    final even=visible && sample!.last.isEven;
+    final tone=even?const Color(0xFF159F70):purple;
+    return SizedBox(width:196,height:196,child:Stack(alignment:Alignment.center,children:[
+      SizedBox(width:190,height:190,child:CircularProgressIndicator(
+        value:digitCountdownProgress,strokeWidth:9,
+        backgroundColor:const Color(0xFFECE3FA),color:tone,
+        strokeCap:StrokeCap.round,
+      )),
+      Column(mainAxisSize:MainAxisSize.min,children:[
+        AnimatedSwitcher(duration:const Duration(milliseconds:220),transitionBuilder:(child,animation)=>
+          FadeTransition(opacity:animation,child:ScaleTransition(scale:animation,child:child)),
+          child:Text(visible?'${sample!.last}':'—',key:ValueKey(visible?'${sample!.last}-${_latestTickEpoch ?? 0}':'expired'),
+            style:TextStyle(fontSize:78,fontWeight:FontWeight.w900,color:tone))),
+        Text(visible?(even?'EVEN':'ODD'):'WAITING',style:TextStyle(fontWeight:FontWeight.w800,color:tone)),
+        const SizedBox(height:4),
+        Text(visible?'${digitSecondsRemaining}s remaining':'Waiting for tick',style:const TextStyle(fontSize:12)),
+      ]),
+    ]));
+  }
+
+  Widget signalHistory() => history.isEmpty && demoTrades.isEmpty?panel('Signal history',const Text('No qualified signals yet. Start the scanner on the Dashboard.')):Column(children:[
+    panel('Broker DEMO trades',Column(children:[
+      Text('Recorded: ${demoTrades.length} • P/L: \$${sessionPnl.toStringAsFixed(2)}'),
+      ...demoTrades.map((t)=>ListTile(title:Text('${t.symbol} ${t.side} • ${t.status}'),
+        subtitle:Text('Contract ${t.contractId} • Stake \$${t.stake.toStringAsFixed(2)} • P/L \$${t.profit.toStringAsFixed(2)}'))),
+    ])),
     panel('Paper outcome tracking',Builder(builder:(context){
       final done=history.where((s)=>s.result!='PENDING').toList();
       final wins=done.where((s)=>s.result=='WIN').length;
@@ -532,17 +809,32 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     ]))),
   ]);
   Widget settings() => Column(children:[
-    panel('Demo trading controls • preview only',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      Text('Suggested demo stake: \$${demoStake.toStringAsFixed(2)}'),
+    panel('Demo execution • manual / automatic',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      SwitchListTile(title:const Text('Automatic DEMO trading'),subtitle:const Text('Off by default • only fresh qualifying signals'),
+        value:autoTrade,onChanged:(v) {
+          if(v && !api.online) {note('Connect demo before enabling auto');return;}
+          if(v && !canTrade) {note('Risk limit or unresolved trade prevents auto');return;}
+          setState(()=>autoTrade=v);
+        }),
+      Text('Demo stake: \$${demoStake.toStringAsFixed(2)}'),
       Slider(value:demoStake,min:0.35,max:2,divisions:33,onChanged:(v)=>setState(()=>demoStake=v)),
-      const Text('No trade execution in this build. Use small stakes when trading is eventually validated.'),
+      Text('Max trades this session: $maxTrades'),
+      Slider(value:maxTrades.toDouble(),min:1,max:10,divisions:9,onChanged:(v)=>setState(()=>maxTrades=v.round())),
+      Text('Maximum consecutive losses: $maxConsecutiveLosses'),
+      Slider(value:maxConsecutiveLosses.toDouble(),min:1,max:4,divisions:3,onChanged:(v)=>setState(()=>maxConsecutiveLosses=v.round())),
+      Text('Session loss cutoff: \$${maxSessionLoss.toStringAsFixed(2)}'),
+      Slider(value:maxSessionLoss,min:0.35,max:5,divisions:93,onChanged:(v)=>setState(()=>maxSessionLoss=v)),
+      FilledButton.icon(onPressed:()=>setState(() {autoTrade=false;status='EMERGENCY STOP: no new demo purchases';}),
+        icon:const Icon(Icons.stop_circle),label:const Text('EMERGENCY STOP • NO NEW TRADES')),
+      if(unresolvedOrder) OutlinedButton(onPressed:confirmReconciled,child:const Text('Reconcile unresolved contract')),
+      const Text('Stop prevents new purchases; it does not cancel an already purchased contract.'),
     ])),
     panel('Scanner settings',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
       Text('Interval: $interval seconds'),Slider(min:30,max:180,divisions:5,value:interval.toDouble(),onChanged:(v)=>setState(()=>interval=v.round())),
       Text('Minimum indicator agreement: $threshold/100'),Slider(min:60,max:95,divisions:7,value:threshold.toDouble(),onChanged:(v)=>setState(()=>threshold=v.round())),
-      OutlinedButton(onPressed:()=>setState(() {history.clear();known.clear();best=null;}),child:const Text('Clear session history')),
+      OutlinedButton(onPressed:()=>setState(() {history.clear();known.clear();best=null;}),child:const Text('Clear signal history')),
     ])),
-    panel('Known limitations',const Text('No automatic trading. No proven predictive AI. No background scanner. No stored token. Paper outcomes are estimates based on subsequent candle closes, not actual contract settlements. Session history is cleared on restart.')),
+    panel('Limitations',const Text('Demo only. Automatic trading works while scanner is running in foreground. A disconnected or closed app cannot guarantee settlement monitoring. Review Deriv portfolio after interruptions. Trading has risk even with virtual funds.')),
   ]);
   @override
   Widget build(BuildContext context) => Scaffold(
