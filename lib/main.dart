@@ -16,7 +16,7 @@ class V8App extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
     debugShowCheckedModeBanner: false,
-    title: 'V8 PRO • Market Lab',
+    title: 'V8 PRO • Expert Trader',
     theme: ThemeData(useMaterial3: true, colorScheme: ColorScheme.fromSeed(seedColor: purple), scaffoldBackgroundColor: const Color(0xFFF4EEFF)),
     home: const LabHome(),
   );
@@ -218,7 +218,9 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   final history = <Setup>[];
   final known = <String>{};
   final precision = <String,int>{};
-  int page=0, interval=60, threshold=75, scans=0, generation=0;
+  int page=0, interval=60, threshold=75, scans=0, generation=0, targetDigit=5;
+  String strategy='Even';
+  double demoStake=0.35;
   bool connecting=false, scanning=false, refreshing=false;
   String account='', status='Disconnected', selected='R_25';
   DateTime? updated;
@@ -256,21 +258,53 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     } catch (e) { note('Connection failed: $e'); }
     finally { if (mounted) setState(() => connecting=false); }
   }
+  int? _precisionValue(dynamic raw) {
+    if (raw == null) return null;
+    final text = '$raw'.trim();
+    final integer = int.tryParse(text);
+    if (integer != null && integer >= 0 && integer <= 10) return integer;
+    final n = double.tryParse(text);
+    if (n == null || n <= 0 || n >= 1) return null;
+    // A pip increment such as 0.001 represents three decimal places.
+    final normalized = n.toStringAsFixed(10).replaceFirst(RegExp(r'0+$'), '');
+    final dot = normalized.indexOf('.');
+    return dot < 0 ? 0 : normalized.length - dot - 1;
+  }
+
   Future<void> loadPrecision() async {
     try {
-      final response = await api.request({'active_symbols':'brief','product_type':'basic'});
+      final response = await api.request({'active_symbols':'full'});
       final list = response['active_symbols'];
       if (list is! List) return;
       for (final row in list) {
         if (row is! Map) continue;
-        final symbol='${row['symbol']}';
-        final pip=double.tryParse('${row['pip']}');
-        if (pip == null || pip <= 0) continue;
-        final raw = pip.toString();
-        final places = raw.contains('.') ? raw.split('.').last.length : 0;
-        if (places>=0 && places<=10) precision[symbol]=places;
+        final symbol = '${row['symbol']}';
+        final places = _precisionValue(row['pip_size']) ?? _precisionValue(row['pip']);
+        if (places != null) precision[symbol] = places;
       }
-    } catch (_) { /* The API may not expose active_symbols on this endpoint. */ }
+    } catch (_) { /* Fallback to live tick metadata below. */ }
+  }
+
+  Future<int> resolvePrecision(String symbol, Map<String,dynamic> historyResponse) async {
+    final history = historyResponse['history'];
+    final fromHistory = _precisionValue(historyResponse['pip_size']) ??
+        (history is Map ? _precisionValue(history['pip_size']) : null);
+    if (fromHistory != null) return precision[symbol] = fromHistory;
+    if (precision[symbol] != null) return precision[symbol]!;
+    // The latest tick carries authoritative quote precision on Deriv's API.
+    final quote = await api.request({'ticks':symbol});
+    final tick = quote['tick'];
+    final fromTick = tick is Map ? _precisionValue(tick['pip_size']) : null;
+    if (fromTick != null) return precision[symbol] = fromTick;
+    // Preserve exact decimal places only if the server sent prices as strings.
+    final prices = history is Map ? history['prices'] : null;
+    if (prices is List && prices.isNotEmpty && prices.every((p)=>p is String)) {
+      final decimals = prices.cast<String>().map((p) => p.contains('.') ? p.split('.').last.length : 0).toSet();
+      if (decimals.length == 1 && decimals.first > 0 && decimals.first <= 10) {
+        return precision[symbol] = decimals.first;
+      }
+    }
+    throw StateError('Quote precision missing from API. Cannot safely calculate last digits.');
   }
   Future<void> disconnect() async {
     stop();
@@ -352,12 +386,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       final data=response['history'];
       if (data is! Map || data['prices'] is! List) throw StateError('Tick prices missing');
       final raw=data['prices'] as List;
-      // Prefer API pip_size; otherwise use active_symbols pip metadata.
-      var places=int.tryParse('${response['pip_size'] ?? data['pip_size'] ?? ''}');
-      places ??= precision[selected];
-      if (places==null || places<0 || places>10) {
-        throw StateError('Quote precision unavailable. Cannot calculate trustworthy last digits.');
-      }
+      final places=await resolvePrecision(selected,response);
       final counts=List<int>.filled(10,0);
       var total=0, last=0;
       for (final price in raw) {
@@ -369,7 +398,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
         counts[digit]++; last=digit; total++;
       }
       if (total==0) throw StateError('No valid ticks returned');
-      if (mounted) setState(() { sample=DigitSample(counts,last,places!,total); status='Loaded $total $selected ticks'; });
+      if (mounted) setState(() { sample=DigitSample(counts,last,places,total); status='Loaded $total $selected ticks'; });
     } catch (e) { note('Tick analysis failed: $e'); }
     finally { if (mounted) setState(() => refreshing=false); }
   }
@@ -383,6 +412,11 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   );
   Widget label(String text) => Text(text,style:const TextStyle(fontSize:14,color:Color(0xFF635C71)));
   Widget dashboard() => Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+    panel('Trading overview',Wrap(spacing:12,runSpacing:8,children:[
+      Chip(avatar:const Icon(Icons.sensors,size:18),label:Text('Markets: ${markets.length}')),
+      Chip(avatar:const Icon(Icons.analytics,size:18),label:Text('Signals: ${history.length}')),
+      Chip(avatar:const Icon(Icons.shield_outlined,size:18),label:const Text('DEMO • SIGNALS ONLY')),
+    ])),
     panel('Connection',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
       TextField(controller:appId,decoration:const InputDecoration(labelText:'Deriv App ID')),
       TextField(controller:token,obscureText:true,autocorrect:false,enableSuggestions:false,decoration:const InputDecoration(labelText:'Demo PAT • never saved')),
@@ -403,6 +437,16 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       Text('${best!.score.toStringAsFixed(0)}/100 indicator agreement (NOT win probability)'),
       label(best!.detail),label('RSI ${best!.rsi.toStringAsFixed(1)} • Movement proxy ${best!.adx.toStringAsFixed(1)}'),
     ])),
+    panel('Recommended trade • manual approval',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      Text(best==null?'Waiting for a qualified signal':'${best!.symbol} ${best!.direction} • ${best!.score.toStringAsFixed(0)}/100 agreement',style:const TextStyle(fontWeight:FontWeight.bold)),
+      const SizedBox(height:8),
+      FilledButton.icon(onPressed:best==null?null:()=>showDialog<void>(context:context,builder:(ctx)=>AlertDialog(
+        title:const Text('Demo trade review'),
+        content:Text('Market: ${best!.symbol}\nDirection: ${best!.direction}\nIndicator agreement: ${best!.score.toStringAsFixed(0)}/100\nSuggested stake: \$${demoStake.toStringAsFixed(2)}\n\nOrder execution remains locked pending API and risk-control validation.'),
+        actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('CLOSE'))],
+      )),icon:const Icon(Icons.verified_user_outlined),label:const Text('Review demo trade')),
+      const Text('Order execution locked until API checks are validated.',style:TextStyle(color:Colors.deepOrange)),
+    ])),
     panel('Live market radar',Column(children:markets.map((m)=>ListTile(dense:true,contentPadding:EdgeInsets.zero,title:Text(m,style:const TextStyle(fontWeight:FontWeight.bold)),subtitle:Text(statuses[m]??'Not scanned'))).toList())),
     panel('Digit analysis',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
       DropdownButton<String>(isExpanded:true,value:selected,items:markets.map((m)=>DropdownMenuItem(value:m,child:Text(m))).toList(),onChanged:(m){if(m!=null)setState(() {selected=m;sample=null;});}),
@@ -422,6 +466,60 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       if(d!=null)...[const SizedBox(height:12),Text('Even: ${[0,2,4,6,8].map((i)=>d.pct(i)).reduce((a,b)=>a+b).toStringAsFixed(1)}%  •  Odd: ${[1,3,5,7,9].map((i)=>d.pct(i)).reduce((a,b)=>a+b).toStringAsFixed(1)}%'),const SizedBox(height:5),label('Historical frequencies only; they do not predict the next digit.')],
     ]);
   }
+  Widget analyzer() => Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+    panel('Market & strategy',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      DropdownButton<String>(value:selected,isExpanded:true,items:markets.map((m)=>DropdownMenuItem(value:m,child:Text(m))).toList(),onChanged:(m){if(m!=null)setState((){selected=m;sample=null;});}),
+      GridView.count(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),crossAxisCount:2,mainAxisSpacing:8,crossAxisSpacing:8,childAspectRatio:2.9,
+        children:['Even','Odd','Over','Under'].map((s)=>FilledButton(
+          style:FilledButton.styleFrom(backgroundColor:s=='Even'?const Color(0xFF1659E9):s=='Odd'?purple:s=='Over'?const Color(0xFF11A365):const Color(0xFFE62C34),
+          side:strategy==s?const BorderSide(color:Colors.black,width:3):BorderSide.none),
+          onPressed:()=>setState(()=>strategy=s),child:Text(s,style:const TextStyle(fontWeight:FontWeight.bold)),
+        )).toList()),
+      const SizedBox(height:8),label('Selected: $strategy • informational only'),
+      if(strategy=='Over'||strategy=='Under')...[
+        const SizedBox(height:8),Text('Digit barrier: $targetDigit'),
+        Slider(value:targetDigit.toDouble(),min:0,max:9,divisions:9,onChanged:(v)=>setState(()=>targetDigit=v.round())),
+      ],
+    ])),
+    panel('Live Analysis',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+      Center(child:Text(selected,style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold))),
+      const SizedBox(height:8),Center(child:Text(sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:36,color:purple,fontWeight:FontWeight.bold))),
+      Center(child:Text(sample==null?'Load live ticks to begin analysis':'${sample!.total} recent ticks • last observed digit')),
+      const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&!refreshing?ticks:null,icon:const Icon(Icons.refresh),label:Text(refreshing?'Loading…':'Live ticks • refresh')),
+    ])),
+    panel('AI Market Analyzer • rule-based',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      Text('Current trend',style:Theme.of(context).textTheme.labelLarge),
+      const SizedBox(height:4),Text(best==null?'Awaiting confirmed market analysis':'${best!.symbol}: ${best!.direction} • EMA / RSI / MACD agreement',style:const TextStyle(fontWeight:FontWeight.bold)),
+      const SizedBox(height:14),Text('Pattern detected',style:Theme.of(context).textTheme.labelLarge),
+      const SizedBox(height:4),Text(sample==null?'Load live ticks to view digit distribution.':
+        'Observed ${sample!.total} ticks. ${strategy=='Even'? 'Even':strategy=='Odd'?'Odd':strategy} is descriptive, not a prediction.'),
+      const SizedBox(height:14),Row(mainAxisAlignment:MainAxisAlignment.spaceEvenly,children:[
+        FilledButton.tonal(onPressed:()=>setState(()=>strategy='Matches'),child:const Text('Matches')),
+        CircleAvatar(radius:39,backgroundColor:purple,child:Text(sample==null?'—':'${sample!.last}',style:const TextStyle(color:Colors.white,fontSize:30,fontWeight:FontWeight.bold))),
+        FilledButton.tonal(onPressed:()=>setState(()=>strategy='Differs'),child:const Text('Differs')),
+      ]),
+      const SizedBox(height:6),Center(child:label('Last observed digit • not a prediction')),
+    ])),
+    panel('Number Distribution Percentages',digitGrid()),
+    panel('Strategy statistics',Builder(builder:(context){
+      final d=sample;
+      if(d==null) return const Text('Connect demo and load live ticks.');
+      final percent=strategy=='Even'?[0,2,4,6,8].fold<double>(0,(v,i)=>v+d.pct(i)):
+        strategy=='Odd'?[1,3,5,7,9].fold<double>(0,(v,i)=>v+d.pct(i)):
+        strategy=='Over'?List.generate(10,(i)=>i).where((i)=>i>targetDigit).fold<double>(0,(v,i)=>v+d.pct(i)):
+        strategy=='Under'?List.generate(10,(i)=>i).where((i)=>i<targetDigit).fold<double>(0,(v,i)=>v+d.pct(i)):
+        strategy=='Matches'?d.pct(targetDigit):100-d.pct(targetDigit);
+      return Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+        Text('$strategy • ${percent.toStringAsFixed(1)}% of sampled ticks',style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)),
+        const SizedBox(height:8),const Text('Historical frequency is not the probability of the next result.'),
+        if(strategy=='Matches'||strategy=='Differs')...[
+          const SizedBox(height:8),Text('Reference digit: $targetDigit'),
+          Slider(value:targetDigit.toDouble(),min:0,max:9,divisions:9,onChanged:(v)=>setState(()=>targetDigit=v.round())),
+        ],
+      ]);
+    })),
+  ]);
+
   Widget signalHistory() => history.isEmpty?panel('Signal history',const Text('No qualified signals yet. Start the scanner on the Dashboard.')):Column(children:[
     panel('Paper outcome tracking',Builder(builder:(context){
       final done=history.where((s)=>s.result!='PENDING').toList();
@@ -434,6 +532,11 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     ]))),
   ]);
   Widget settings() => Column(children:[
+    panel('Demo trading controls • preview only',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      Text('Suggested demo stake: \$${demoStake.toStringAsFixed(2)}'),
+      Slider(value:demoStake,min:0.35,max:2,divisions:33,onChanged:(v)=>setState(()=>demoStake=v)),
+      const Text('No trade execution in this build. Use small stakes when trading is eventually validated.'),
+    ])),
     panel('Scanner settings',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
       Text('Interval: $interval seconds'),Slider(min:30,max:180,divisions:5,value:interval.toDouble(),onChanged:(v)=>setState(()=>interval=v.round())),
       Text('Minimum indicator agreement: $threshold/100'),Slider(min:60,max:95,divisions:7,value:threshold.toDouble(),onChanged:(v)=>setState(()=>threshold=v.round())),
@@ -443,14 +546,18 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   ]);
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar:AppBar(backgroundColor:const Color(0xFFE8DCFA),title:const Text('V8 PRO • Market Lab'),actions:[Padding(padding:const EdgeInsets.only(right:16),child:Center(child:Text(api.online?'● DEMO':'○ OFFLINE',style:TextStyle(fontWeight:FontWeight.bold,color:api.online?Colors.green:Colors.grey))))]),
+    appBar:AppBar(backgroundColor:const Color(0xFFE8DCFA),title:const Text('V8 PRO • Expert Trader'),actions:[Padding(padding:const EdgeInsets.only(right:16),child:Center(child:Text(api.online?'● DEMO':'○ OFFLINE',style:TextStyle(fontWeight:FontWeight.bold,color:api.online?Colors.green:Colors.grey))))]),
     body:Column(children:[
       Container(width:double.infinity,color:const Color(0xFFEDE4FC),padding:const EdgeInsets.symmetric(horizontal:16,vertical:10),child:Text(status,maxLines:2,overflow:TextOverflow.ellipsis)),
-      Expanded(child:ListView(padding:const EdgeInsets.all(14),children:[if(page==0)dashboard() else if(page==1)signalHistory() else settings()])),
+      Expanded(child:ListView(padding:const EdgeInsets.all(14),children:[if(page==0)dashboard() else if(page==1)signalHistory() else if(page==2)analyzer() else settings()])),
     ]),
+    floatingActionButton:page==2?null:FloatingActionButton.extended(
+      onPressed:()=>setState(()=>page=2),backgroundColor:purple,foregroundColor:Colors.white,
+      icon:const Icon(Icons.auto_graph),label:const Text('Expert Analysis')),
     bottomNavigationBar:NavigationBar(selectedIndex:page,onDestinationSelected:(i)=>setState(()=>page=i),destinations:const [
       NavigationDestination(icon:Icon(Icons.dashboard_outlined),label:'Dashboard'),
       NavigationDestination(icon:Icon(Icons.history),label:'History'),
+      NavigationDestination(icon:Icon(Icons.pin_outlined),label:'Analyzer'),
       NavigationDestination(icon:Icon(Icons.settings_outlined),label:'Settings'),
     ]),
   );
