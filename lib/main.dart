@@ -31,6 +31,8 @@ class DerivApi {
   int _id = 0;
   bool online = false;
   void Function(String)? onLost;
+  void Function(Map<String, dynamic>)? onTick;
+  String? tickSubscriptionId;
   // Trading is possible only over an OTP-authenticated demo socket.
   bool get demoSocket => online;
 
@@ -75,6 +77,11 @@ class DerivApi {
           final value = jsonDecode(event as String);
           if (value is! Map) return;
           final message = Map<String, dynamic>.from(value);
+          if (message['msg_type'] == 'tick' && message['tick'] is Map) {
+            final sub = message['subscription'];
+            if (sub is Map && sub['id'] != null) tickSubscriptionId = '${sub['id']}';
+            onTick?.call(message);
+          }
           final id = int.tryParse('${message['req_id']}');
           final c = id == null ? null : _pending.remove(id);
           if (c == null || c.isCompleted) return;
@@ -112,7 +119,16 @@ class DerivApi {
     } finally { _pending.remove(id); }
   }
 
+  Future<void> unsubscribeTicks() async {
+    final id = tickSubscriptionId;
+    tickSubscriptionId = null;
+    if (id != null && online) {
+      try { await request({'forget': id}); } catch (_) {}
+    }
+  }
+
   Future<void> close() async {
+    tickSubscriptionId = null;
     online = false;
     _ping?.cancel();
     _ping = null;
@@ -166,37 +182,86 @@ double rsi(List<double> xs) {
   return 100 - 100/(1+gains/losses);
 }
 
-Setup? assess(String symbol, List<Candle> bars) {
-  if (bars.length < 100) return null;
-  final c = bars.map((b) => b.close).toList();
-  final f = ema(c,20), s = ema(c,50), f0 = ema(c.sublist(0,c.length-1),20);
-  final momentum = rsi(c);
-  final ranges = <double>[];
-  for (var i=1;i<bars.length;i++) {
-    ranges.add(max(bars[i].high-bars[i].low,max((bars[i].high-c[i-1]).abs(),(bars[i].low-c[i-1]).abs())));
+// V8 PRO Expert Mode 2.0: independent, CLOSED-candle multi-timeframe checks.
+// Scores measure indicator agreement, never predicted win probability.
+List<Candle> aggregateBars(List<Candle> bars, int minutes) {
+  final period = minutes * 60;
+  final groups = <int,List<Candle>>{};
+  for (final b in bars) {
+    final key = (b.epoch ~/ period) * period;
+    groups.putIfAbsent(key, () => <Candle>[]).add(b);
   }
-  final atr = ranges.skip(ranges.length-14).reduce((a,b)=>a+b)/14;
-  if (atr <= 0) return null;
-  final plus = <double>[], minus = <double>[];
-  for (var i=1;i<bars.length;i++) {
-    final up = bars[i].high-bars[i-1].high;
-    final down = bars[i-1].low-bars[i].low;
-    plus.add(up>down && up>0 ? up : 0);
-    minus.add(down>up && down>0 ? down : 0);
+  final result = <Candle>[];
+  for (final entry in groups.entries) {
+    final group = entry.value..sort((a,b) => a.epoch.compareTo(b.epoch));
+    // Only complete groups; never use an unfinished higher-timeframe candle.
+    if (group.length != minutes || group.first.epoch != entry.key ||
+        group.last.epoch != entry.key + (minutes-1)*60) continue;
+    result.add(Candle(entry.key,group.first.open,
+      group.map((b)=>b.high).reduce(max),group.map((b)=>b.low).reduce(min),group.last.close));
   }
-  final p = plus.skip(plus.length-14).reduce((a,b)=>a+b)/14;
-  final m = minus.skip(minus.length-14).reduce((a,b)=>a+b)/14;
-  final adxProxy = (p+m)==0 ? 0.0 : 100*(p-m).abs()/(p+m);
-  // This is a directional-movement strength proxy, not Wilder ADX.
-  final macd = ema(c,12)-ema(c,26);
-  final prior = ema(c.sublist(0,c.length-1),12)-ema(c.sublist(0,c.length-1),26);
-  final bull = f>s && f>f0 && c.last>f && momentum>=53 && momentum<=70 && macd>0 && macd>prior;
-  final bear = f<s && f<f0 && c.last<f && momentum>=30 && momentum<=47 && macd<0 && macd<prior;
-  if (!bull && !bear) return null;
-  final sep = (f-s).abs()/atr;
-  if (sep < .15 || sep > 3 || adxProxy < 18) return null;
-  final score = (55 + min(20.0,sep*9) + min(15.0,adxProxy*.22) + min(10.0,(momentum-50).abs()*.7)).clamp(0.0,100.0).toDouble();
-  return Setup(symbol,bull?'CALL':'PUT','EMA20/50 + RSI + MACD alignment; movement proxy ${adxProxy.toStringAsFixed(1)}',score,momentum,adxProxy,c.last,bars.last.epoch);
+  result.sort((a,b)=>a.epoch.compareTo(b.epoch));
+  return result;
+}
+
+class FrameReading {
+  final String trend;
+  final double momentum, atr, strength;
+  final bool up, down, extended;
+  const FrameReading(this.trend,this.momentum,this.atr,this.strength,this.up,this.down,this.extended);
+}
+
+FrameReading? readFrame(List<Candle> bars) {
+  if (bars.length < 55) return null;
+  final c=bars.map((b)=>b.close).toList();
+  final fast=ema(c,20),slow=ema(c,50);
+  final priorFast=ema(c.sublist(0,c.length-1),20);
+  final momentum=rsi(c);
+  final tr=<double>[];
+  for (var i=1;i<bars.length;i++) {
+    tr.add(max(bars[i].high-bars[i].low,
+      max((bars[i].high-c[i-1]).abs(),(bars[i].low-c[i-1]).abs())));
+  }
+  final atr=tr.sublist(tr.length-14).reduce((a,b)=>a+b)/14;
+  if(atr<=0 || !atr.isFinite) return null;
+  final macd=ema(c,12)-ema(c,26);
+  final oldMacd=ema(c.sublist(0,c.length-1),12)-ema(c.sublist(0,c.length-1),26);
+  final rising=fast>slow && fast>priorFast && c.last>fast && macd>0 && macd>=oldMacd;
+  final falling=fast<slow && fast<priorFast && c.last<fast && macd<0 && macd<=oldMacd;
+  final separation=(fast-slow).abs()/atr;
+  final recent=bars.sublist(bars.length-12);
+  final first=recent.sublist(0,6), second=recent.sublist(6);
+  final high1=first.map((b)=>b.high).reduce(max);
+  final high2=second.map((b)=>b.high).reduce(max);
+  final low1=first.map((b)=>b.low).reduce(min);
+  final low2=second.map((b)=>b.low).reduce(min);
+  final higher=high2>high1 && low2>low1;
+  final lower=high2<high1 && low2<low1;
+  final extended=(c.last-fast).abs()/atr>2.1 || separation>3.0;
+  final up=rising && higher && momentum>=51 && momentum<=70;
+  final down=falling && lower && momentum>=30 && momentum<=49;
+  return FrameReading(up?'BULLISH':down?'BEARISH':'MIXED',momentum,atr,separation,up,down,extended);
+}
+
+Setup? assess(String symbol,List<Candle> bars) {
+  // 15m EMA50 requires at least 750 minutes of history.
+  final one=readFrame(bars);
+  final five=readFrame(aggregateBars(bars,5));
+  final fifteen=readFrame(aggregateBars(bars,15));
+  if(one==null || five==null || fifteen==null) return null;
+  final bull=one.up && five.up && fifteen.up;
+  final bear=one.down && five.down && fifteen.down;
+  if(!bull && !bear) return null;
+  if(one.extended || five.extended || one.strength<0.16) return null;
+  final direction=bull?'CALL':'PUT';
+  final strength=min(15.0,one.strength*8);
+  final alignment=min(10.0,five.strength*5);
+  final score=(72.0+strength+alignment).clamp(0.0,95.0).toDouble();
+  final detail='PRO 2.0 • 1m ${one.trend}, 5m ${five.trend}, 15m ${fifteen.trend}; '
+    'higher-timeframe confirmation; structure + EMA20/50 + MACD + RSI; '
+    'ATR entry filter; RSI ${one.momentum.toStringAsFixed(1)}. '
+    'Indicator agreement only, NOT a win probability.';
+  return Setup(symbol,direction,detail,score,one.momentum,one.strength*100,bars.last.close,bars.last.epoch);
 }
 
 class DigitSample {
@@ -248,6 +313,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   Setup? best;
   Timer? _digitTimer;
   bool _pollingTick=false;
+  bool streamingTicks=false;
   bool liveDigits=false;
   final Queue<int> _recentDigits=Queue<int>();
   int? _latestTickEpoch;
@@ -270,6 +336,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    api.onTick = _handleStreamTick;
     api.onLost = (reason) { autoTrade=false; unresolvedOrder=activeContractId!=null || orderBusy; _stopLiveDigits(); stop(); if (mounted) setState(() { account=''; status=reason; }); };
   }
   @override
@@ -358,7 +425,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     generation++;
     if (mounted) setState(() { scanning=false; status=reason; });
   }
-  Future<List<Candle>> candles(String symbol, {int count=180}) async {
+  Future<List<Candle>> candles(String symbol, {int count=900}) async {
     final response = await api.request({'ticks_history':symbol,'end':'latest','style':'candles','granularity':60,'count':count});
     final raw=response['candles'];
     if (raw is! List) throw StateError('Candle history unavailable');
@@ -379,7 +446,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
           final bars=await candles(m);
           if (!mounted || run!=generation) break;
           final setup=assess(m,bars);
-          if (setup==null) { statuses[m]='No confirmed setup'; }
+          if (setup==null) { statuses[m]='NO TRADE • 1m/5m/15m disagreement, incomplete data, or entry filter'; }
           else {
             statuses[m]='${setup.direction} • ${setup.score.toStringAsFixed(0)}/100 agreement';
             if (setup.score>=threshold) {
@@ -428,8 +495,9 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     }
   }
 
-  bool get canTrade => api.online && !orderBusy && !unresolvedOrder &&
+  bool get canTrade => demoStake>=0.35 && demoStake<=10000 && demoStake.isFinite && api.online && !orderBusy && !unresolvedOrder &&
       activeContractId==null && tradeCount<maxTrades &&
+      demoStake <= maxSessionLoss + sessionPnl &&
       lossStreak<maxConsecutiveLosses && sessionPnl > -maxSessionLoss &&
       (lastOrderAt==null || DateTime.now().difference(lastOrderAt!).inSeconds>=300);
 
@@ -556,6 +624,8 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
 
   void _stopLiveDigits() {
     liveDigits=false;
+    streamingTicks=false;
+    unawaited(api.unsubscribeTicks());
     _digitTimer?.cancel();
     _digitTimer=null;
     _digitReceivedAt=null;
@@ -572,6 +642,31 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     if(n==null || !n.isFinite) return null;
     final formatted=n.toStringAsFixed(places);
     return int.tryParse(formatted.substring(formatted.length-1));
+  }
+
+  void _handleStreamTick(Map<String, dynamic> message) {
+    if (!mounted || !liveDigits || !streamingTicks || sample == null) return;
+    final tick = message['tick'];
+    if (tick is! Map) return;
+    final symbol = tick['symbol']?.toString();
+    if (symbol != null && symbol != selected) return;
+    final epoch = int.tryParse('${tick['epoch']}');
+    final quote = tick['quote'];
+    if (epoch == null || quote == null) return;
+    final places = _precisionValue(tick['pip_size']) ?? precision[selected] ?? sample!.precision;
+    final digit = _digitFromPrice(quote, places);
+    if (digit == null) return;
+    // Same-second ticks are valid. Do not reject them based on epoch alone.
+    _latestTickEpoch = epoch;
+    _recentDigits.addLast(digit);
+    while (_recentDigits.length > 1000) { _recentDigits.removeFirst(); }
+    final counts = List<int>.filled(10, 0);
+    for (final n in _recentDigits) { counts[n]++; }
+    setState(() {
+      sample = DigitSample(counts, digit, places, _recentDigits.length);
+      _digitReceivedAt = DateTime.now();
+      _digitError = null;
+    });
   }
 
   // Poll the latest quote every two seconds. New quotes replace the old
@@ -610,13 +705,28 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     if(!api.online || sample==null) return;
     _digitTimer?.cancel();
     liveDigits=true;
+    streamingTicks=false;
     _digitReceivedAt=DateTime.now();
     _digitTimer=Timer.periodic(const Duration(milliseconds:250),(timer) {
       if(!mounted || !api.online || !liveDigits) {timer.cancel();return;}
-      if(timer.tick%8==0) { _pollLatestDigit(); }
+      if(timer.tick%8==0 && !streamingTicks) { _pollLatestDigit(); }
       if(mounted && page==2) setState(() {});
     });
-    _pollLatestDigit();
+    // Prefer push ticks; fall back to polling if subscription is unsupported.
+    unawaited(() async {
+      try {
+        await api.unsubscribeTicks();
+        if (!mounted || !liveDigits) return;
+        final response = await api.request({'ticks': selected, 'subscribe': 1});
+        if (response['tick'] is! Map) throw StateError('Tick subscription unavailable');
+        if (!mounted || !liveDigits) return;
+        streamingTicks = true;
+        _handleStreamTick(response);
+      } catch (_) {
+        streamingTicks = false;
+        if (mounted && liveDigits) _pollLatestDigit();
+      }
+    }());
   }
 
   Future<void> ticks() async {
@@ -804,7 +914,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       return Text('Signals: ${history.length}  •  Evaluated: ${done.length}  •  Paper wins: $wins\n${done.isEmpty?'No evaluated outcomes yet.':'Paper directional success: ${(wins*100/done.length).toStringAsFixed(1)}%'}\n\nMeasured against a later 5-minute candle close. This is NOT a broker trade win rate.');
     })),
     ...history.map((s)=>panel('${s.symbol}  ${s.direction}  •  ${s.result}',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      Text('${s.score.toStringAsFixed(0)}/100 agreement'),label(s.detail),label('RSI ${s.rsi.toStringAsFixed(1)} • Proxy ${s.adx.toStringAsFixed(1)}'),
+      Text('${s.score.toStringAsFixed(0)}/100 agreement'),label(s.detail),label('RSI ${s.rsi.toStringAsFixed(1)} • ATR-normalized trend strength ${s.adx.toStringAsFixed(1)}'),
       label('Candle: ${DateTime.fromMillisecondsSinceEpoch(s.epoch*1000)}'),
     ]))),
   ]);
@@ -812,12 +922,13 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     panel('Demo execution • manual / automatic',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
       SwitchListTile(title:const Text('Automatic DEMO trading'),subtitle:const Text('Off by default • only fresh qualifying signals'),
         value:autoTrade,onChanged:(v) {
+          if(v && (demoStake<0.35 || !demoStake.isFinite)) {note('Enter a valid demo stake first');return;}
           if(v && !api.online) {note('Connect demo before enabling auto');return;}
           if(v && !canTrade) {note('Risk limit or unresolved trade prevents auto');return;}
           setState(()=>autoTrade=v);
         }),
       Text('Demo stake: \$${demoStake.toStringAsFixed(2)}'),
-      Slider(value:demoStake,min:0.35,max:2,divisions:33,onChanged:(v)=>setState(()=>demoStake=v)),
+      TextFormField(initialValue:demoStake.toStringAsFixed(2),keyboardType:const TextInputType.numberWithOptions(decimal:true),decoration:const InputDecoration(labelText:'Stake (USD)',helperText:'Broker contract minimum/maximum applies • DEMO only'),onChanged:(text){final amount=double.tryParse(text);if(amount!=null && amount.isFinite && amount>=0.35 && amount<=10000){setState(()=>demoStake=amount);}else{setState(()=>demoStake=0);}}),
       Text('Max trades this session: $maxTrades'),
       Slider(value:maxTrades.toDouble(),min:1,max:10,divisions:9,onChanged:(v)=>setState(()=>maxTrades=v.round())),
       Text('Maximum consecutive losses: $maxConsecutiveLosses'),
@@ -831,9 +942,10 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     ])),
     panel('Scanner settings',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
       Text('Interval: $interval seconds'),Slider(min:30,max:180,divisions:5,value:interval.toDouble(),onChanged:(v)=>setState(()=>interval=v.round())),
-      Text('Minimum indicator agreement: $threshold/100'),Slider(min:60,max:95,divisions:7,value:threshold.toDouble(),onChanged:(v)=>setState(()=>threshold=v.round())),
+      Text('Minimum PRO agreement: $threshold/100'),Slider(min:60,max:95,divisions:7,value:threshold.toDouble(),onChanged:(v)=>setState(()=>threshold=v.round())),
       OutlinedButton(onPressed:()=>setState(() {history.clear();known.clear();best=null;}),child:const Text('Clear signal history')),
     ])),
+    panel('Expert Mode 2.0',const Text('Closed 1m, 5m and 15m candles • EMA20/50 • MACD • RSI • market structure • ATR entry filters. Conflicting timeframes produce NO TRADE. Scores are not win probabilities. Requires sufficient history.')),
     panel('Limitations',const Text('Demo only. Automatic trading works while scanner is running in foreground. A disconnected or closed app cannot guarantee settlement monitoring. Review Deriv portfolio after interruptions. Trading has risk even with virtual funds.')),
   ]);
   @override
