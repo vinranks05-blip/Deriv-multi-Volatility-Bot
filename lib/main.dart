@@ -809,7 +809,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       FilledButton.tonalIcon(onPressed:api.online&&!refreshing?ticks:null,icon:const Icon(Icons.refresh),label:Text(refreshing?'Loading…':'Load 1,000 live ticks')),
       const SizedBox(height:12),digitGrid(),
     ])),
-    panel('Safety',const Text('Demo research tool. No real or demo orders are executed. Signal scores are indicator agreement, not calibrated probabilities. Paper outcomes are not broker contract results.')),
+    panel('Safety',const Text('Demo-only: manual and optional automatic DEMO purchase code is present but not yet end-to-end verified. REAL-money execution is disabled. Scores measure indicator agreement, not win probability. Paper outcomes are not broker contract results.')),
   ]);
   Widget digitGrid() {
     final d=sample;
@@ -918,6 +918,39 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       label('Candle: ${DateTime.fromMillisecondsSinceEpoch(s.epoch*1000)}'),
     ]))),
   ]);
+  // Evidence gate: observed broker DEMO settlements only, never paper signals.
+  // A 70% observed rate is not a guarantee of future outcomes.
+  int get settledDemoCount => demoTrades.where((t)=>t.status=='WIN' || t.status=='LOSS').length;
+  int get settledDemoWins => demoTrades.where((t)=>t.status=='WIN').length;
+  double get settledDemoRate => settledDemoCount==0?0:settledDemoWins/settledDemoCount;
+  double get demoWinRateLowerBound {
+    final n=settledDemoCount;
+    if(n==0) return 0;
+    const z=1.96;
+    final p=settledDemoRate;
+    final d=1+z*z/n;
+    return (p+z*z/(2*n)-z*sqrt(p*(1-p)/n+z*z/(4*n*n)))/d;
+  }
+  Widget readinessPanel() {
+    final n=settledDemoCount;
+    final rate=(settledDemoRate*100).toStringAsFixed(1);
+    final lower=(demoWinRateLowerBound*100).toStringAsFixed(1);
+    final enough=n>=200;
+    final thresholdMet=settledDemoRate>=0.70 && demoWinRateLowerBound>=0.70;
+    return panel('Real-money readiness • LOCKED',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      const Text('REAL-MONEY ORDERS ARE NOT IMPLEMENTED OR ENABLED.',style:TextStyle(fontWeight:FontWeight.bold,color:Colors.red)),
+      const SizedBox(height:8),
+      Text('Verified demo settlements: $n / 200 minimum'),
+      Text('Broker demo win rate: $rate% • 95% lower confidence bound: $lower%'),
+      Text('Evidence check: ${enough && thresholdMet?'TARGET OBSERVED':'NOT MET'}'),
+      const SizedBox(height:8),
+      const Text('Goal: observe at least 70–80% success across substantial, broker-settled demo trades, with the lower confidence bound at or above 70%. A high win rate alone does not prove profitability: payout, average loss, fees, slippage and drawdown matter.'),
+      const SizedBox(height:8),
+      const Text('Still required before real money: verified proposal/buy/settlement on demo, persisted broker transaction history, real-account authentication, manual confirmation showing broker payout and expiry, independent daily loss cap, and reconnection reconciliation.'),
+      const SizedBox(height:8),
+      const Text('No XML required. Real mode must be separately implemented and tested. Never use a real PAT with this demo-only build.'),
+    ]));
+  }
   Widget settings() => Column(children:[
     panel('Demo execution • manual / automatic',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
       SwitchListTile(title:const Text('Automatic DEMO trading'),subtitle:const Text('Off by default • only fresh qualifying signals'),
@@ -945,6 +978,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       Text('Minimum PRO agreement: $threshold/100'),Slider(min:60,max:95,divisions:7,value:threshold.toDouble(),onChanged:(v)=>setState(()=>threshold=v.round())),
       OutlinedButton(onPressed:()=>setState(() {history.clear();known.clear();best=null;}),child:const Text('Clear signal history')),
     ])),
+    readinessPanel(),
     panel('Expert Mode 2.0',const Text('Closed 1m, 5m and 15m candles • EMA20/50 • MACD • RSI • market structure • ATR entry filters. Conflicting timeframes produce NO TRADE. Scores are not win probabilities. Requires sufficient history.')),
     panel('Limitations',const Text('Demo only. Automatic trading works while scanner is running in foreground. A disconnected or closed app cannot guarantee settlement monitoring. Review Deriv portfolio after interruptions. Trading has risk even with virtual funds.')),
   ]);
