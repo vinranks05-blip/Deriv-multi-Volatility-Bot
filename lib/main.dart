@@ -305,6 +305,52 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   DateTime? lastOrderAt;
 
   String strategy='Even';
+  DateTime? predictionDeadline;
+  String? lockedPrediction;
+  String? lockedMarket;
+  int? lockedBarrier;
+  int? revealedDigit;
+  String predictionOutcome='Tap Predict to start a 10-second observation.';
+  final Map<String,List<int>> predictionStats={}; // [correct, evaluated]
+  int predictionRound=0;
+  bool get predictionActive => predictionDeadline!=null && revealedDigit==null;
+  int get predictionRemaining => predictionDeadline==null ? 0 :
+      (predictionDeadline!.difference(DateTime.now()).inMilliseconds / 1000).ceil().clamp(0,10).toInt();
+  void startPrediction() {
+    if (!api.online || !liveDigits || sample==null || predictionActive) return;
+    setState(() {
+      predictionRound++;
+      lockedPrediction=strategy;
+      lockedMarket=selected;
+      lockedBarrier=targetDigit;
+      revealedDigit=null;
+      predictionDeadline=DateTime.now().add(const Duration(seconds:10));
+      predictionOutcome='Prediction locked. Waiting for first tick at or after deadline…';
+    });
+  }
+  bool _predictionCorrect(String type,int digit,int barrier) {
+    switch(type) {
+      case 'Even': return digit.isEven;
+      case 'Odd': return digit.isOdd;
+      case 'Over': return digit>barrier;
+      case 'Under': return digit<barrier;
+      case 'Matches': return digit==barrier;
+      case 'Differs': return digit!=barrier;
+      default: return false;
+    }
+  }
+  void _observePredictionDigit(int digit) {
+    if (!predictionActive || predictionDeadline==null || lockedMarket!=selected) return;
+    if (DateTime.now().isBefore(predictionDeadline!)) return;
+    final type=lockedPrediction!;
+    final success=_predictionCorrect(type,digit,lockedBarrier!);
+    final stats=predictionStats.putIfAbsent(type,()=>[0,0]);
+    stats[1]++;
+    if(success) stats[0]++;
+    revealedDigit=digit;
+    predictionOutcome=success?'CORRECT prediction':'INCORRECT prediction';
+  }
+
   double demoStake=0.35;
   bool connecting=false, scanning=false, refreshing=false;
   String account='', status='Disconnected', selected='R_25';
@@ -630,6 +676,10 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     _digitTimer=null;
     _digitReceivedAt=null;
     _latestTickEpoch=null;
+    if (predictionActive) {
+      predictionDeadline=null;
+      predictionOutcome='Prediction cancelled: live feed stopped. No result recorded.';
+    }
   }
 
   void _changeDigitMarket(String market) {
@@ -666,6 +716,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       sample = DigitSample(counts, digit, places, _recentDigits.length);
       _digitReceivedAt = DateTime.now();
       _digitError = null;
+      _observePredictionDigit(digit);
     });
   }
 
@@ -695,6 +746,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
         sample=DigitSample(counts,digit,places,_recentDigits.length);
         _digitReceivedAt=DateTime.now();
         _digitError=null;
+        _observePredictionDigit(digit);
       });
     } catch(e) {
       if(mounted && liveDigits) setState(()=>_digitError='Live quote update failed. Retrying…');
@@ -732,6 +784,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   Future<void> ticks() async {
     if (!api.online || refreshing) { note('Connect demo first'); return; }
     _stopLiveDigits();
+    predictionDeadline=null; revealedDigit=null; lockedPrediction=null;
     final requestedMarket=selected;
     setState(() { refreshing=true; sample=null; status='Loading live tick history…'; });
     try {
@@ -822,17 +875,110 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       if(d!=null)...[const SizedBox(height:12),Text('Even: ${[0,2,4,6,8].map((i)=>d.pct(i)).reduce((a,b)=>a+b).toStringAsFixed(1)}%  •  Odd: ${[1,3,5,7,9].map((i)=>d.pct(i)).reduce((a,b)=>a+b).toStringAsFixed(1)}%'),const SizedBox(height:5),label('Historical frequencies only; they do not predict the next digit.')],
     ]);
   }
+  // Read-only statistics, not a calibrated probability of the next digit.
+  double strategyFrequency(String type, int barrier) {
+    final d=sample;
+    if (d==null || d.total==0) return 0;
+    final digits=List.generate(10,(i)=>i);
+    return digits.where((i) {
+      switch(type) {
+        case 'Even': return i.isEven;
+        case 'Odd': return i.isOdd;
+        case 'Over': return i>barrier;
+        case 'Under': return i<barrier;
+        case 'Matches': return i==barrier;
+        case 'Differs': return i!=barrier;
+        default: return false;
+      }
+    }).fold<double>(0,(sum,i)=>sum+d.pct(i));
+  }
+
+  Widget expertOverview() {
+    final d=sample;
+    final freq=strategyFrequency(strategy,targetDigit);
+    final stats=predictionStats[strategy]??[0,0];
+    final observed=stats[1];
+    return panel('Expert Strategy Analyzer',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+      Text('Market: $selected',style:const TextStyle(fontSize:17,fontWeight:FontWeight.w700)),
+      const SizedBox(height:8),
+      Text('Selected contract: $strategy${['Over','Under','Matches','Differs'].contains(strategy)?' • barrier $targetDigit':''}',
+        style:const TextStyle(fontSize:17,fontWeight:FontWeight.bold)),
+      const SizedBox(height:12),
+      Wrap(spacing:8,runSpacing:8,children:[
+        Chip(label:Text(d==null?'No live sample':'${d.total} sampled ticks')),
+        Chip(label:Text(d==null?'Frequency unavailable':'Historical frequency ${freq.toStringAsFixed(1)}%')),
+        Chip(label:Text(observed==0?'No evaluated predictions':'Simulation ${stats[0]}/$observed correct')),
+      ]),
+      const SizedBox(height:10),
+      Text(d==null?'Connect to demo and load ticks to begin analysis.':
+        'This frequency describes past digits, not the chance of winning the next contract. ' 
+        'The analyzer cannot reliably predict random digits.',
+        style:const TextStyle(color:Color(0xFF555166))),
+      const SizedBox(height:12),
+      FilledButton.icon(
+        onPressed:api.online&&!refreshing?ticks:null,
+        icon:const Icon(Icons.analytics_outlined),
+        label:Text(refreshing?'Analysing live data…':'Start Expert Analysis'),
+      ),
+      const SizedBox(height:8),
+      const Text('Decision: OBSERVE • A broker quote and manual confirmation are required for any trade.',
+        style:TextStyle(fontWeight:FontWeight.w700)),
+    ]));
+  }
+
+  Widget predictionDisplay() {
+    final active=predictionActive;
+    final complete=lockedPrediction!=null && revealedDigit!=null;
+    final progress=active ? (predictionRemaining/10).clamp(0.0,1.0) : 0.0;
+    return panel('Prediction challenge • 10 seconds',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+      const Text('Choose a strategy above, then tap Predict. The choice stays locked while the market continues updating.'),
+      const SizedBox(height:12),
+      Text(lockedPrediction==null?'Choose a strategy':
+        '$lockedMarket • $lockedPrediction${['Over','Under','Matches','Differs'].contains(lockedPrediction)?' $lockedBarrier':''}',
+        textAlign:TextAlign.center,style:const TextStyle(fontSize:20,fontWeight:FontWeight.bold)),
+      const SizedBox(height:12),
+      Center(child:SizedBox(height:180,width:180,child:Stack(alignment:Alignment.center,children:[
+        SizedBox.expand(child:CircularProgressIndicator(value:progress,strokeWidth:12,
+          backgroundColor:const Color(0xFFEADFF7),color:purple)),
+        Column(mainAxisAlignment:MainAxisAlignment.center,children:[
+          Text(active?'${predictionRemaining}':complete?'$revealedDigit':'—',
+            style:const TextStyle(fontSize:68,fontWeight:FontWeight.w900,color:purple)),
+          Text(active?'SECONDS':complete?'ACTUAL DIGIT':'READY',
+            style:const TextStyle(fontWeight:FontWeight.bold)),
+        ]),
+      ]))),
+      const SizedBox(height:12),
+      Text(predictionOutcome,textAlign:TextAlign.center,
+        style:TextStyle(fontWeight:FontWeight.w700,color:complete?
+          (predictionOutcome.startsWith('CORRECT')?const Color(0xFF16845E):const Color(0xFFC52C40)):null)),
+      const SizedBox(height:14),
+      FilledButton.icon(onPressed:api.online&&liveDigits&&sample!=null&&!active?startPrediction:null,
+        icon:const Icon(Icons.psychology_alt_outlined),
+        label:Text(active?'Prediction locked…':complete?'Predict again':'Predict • Start 10s countdown')),
+      const SizedBox(height:14),
+      const Text('Simulated observation only • Not a Deriv purchase or contract settlement.',
+        textAlign:TextAlign.center,style:TextStyle(color:Color(0xFF655E70))),
+      const SizedBox(height:10),
+      ...['Even','Odd','Over','Under','Matches','Differs'].map((type){
+        final n=predictionStats[type]??[0,0];
+        return Padding(padding:const EdgeInsets.symmetric(vertical:2),child:Text(
+          '$type: ${n[0]}/${n[1]} correct${n[1]>0?' • ${(100*n[0]/n[1]).toStringAsFixed(1)}%':''}'));
+      }),
+    ]));
+  }
+
   Widget analyzer() => Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+    expertOverview(),
     panel('Market & strategy',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
       DropdownButton<String>(value:selected,isExpanded:true,items:markets.map((m)=>DropdownMenuItem(value:m,child:Text(m))).toList(),onChanged:(m){if(m!=null)_changeDigitMarket(m);}),
       GridView.count(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),crossAxisCount:2,mainAxisSpacing:8,crossAxisSpacing:8,childAspectRatio:2.9,
-        children:['Even','Odd','Over','Under'].map((s)=>FilledButton(
+        children:['Even','Odd','Over','Under','Matches','Differs'].map((s)=>FilledButton(
           style:FilledButton.styleFrom(backgroundColor:s=='Even'?const Color(0xFF1659E9):s=='Odd'?purple:s=='Over'?const Color(0xFF11A365):const Color(0xFFE62C34),
           side:strategy==s?const BorderSide(color:Colors.black,width:3):BorderSide.none),
           onPressed:()=>setState(()=>strategy=s),child:Text(s,style:const TextStyle(fontWeight:FontWeight.bold)),
         )).toList()),
       const SizedBox(height:8),label('Selected: $strategy • informational only'),
-      if(strategy=='Over'||strategy=='Under')...[
+      if(['Over','Under','Matches','Differs'].contains(strategy))...[
         const SizedBox(height:8),Text('Digit barrier: $targetDigit'),
         Slider(value:targetDigit.toDouble(),min:0,max:9,divisions:9,onChanged:(v)=>setState(()=>targetDigit=v.round())),
       ],
@@ -841,13 +987,13 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       Center(child:Text(selected,style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold))),
       const SizedBox(height:14),Center(child:digitDial()),
       const SizedBox(height:8),Center(child:Text(sample==null?'Load 1,000 ticks to begin':
-        digitVisible?'New market tick replaces this digit immediately':
+        digitVisible?'Live feed continues; prediction stays locked for 10 seconds':
         'No new tick in 10 seconds • waiting for the next quote',textAlign:TextAlign.center)),
       if(_digitError!=null)...[const SizedBox(height:8),Center(child:label(_digitError!))],
       if(sample!=null) Center(child:label('${sample!.total} recent ticks • last observed digit')), 
       const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&!refreshing?ticks:null,icon:const Icon(Icons.refresh),label:Text(refreshing?'Loading…':'Live ticks • refresh')),
     ])),
-    panel('AI Market Analyzer • rule-based',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+    panel('Market observations • rule-based',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
       Text('Current trend',style:Theme.of(context).textTheme.labelLarge),
       const SizedBox(height:4),Text(best==null?'Awaiting confirmed market analysis':'${best!.symbol}: ${best!.direction} • EMA / RSI / MACD agreement',style:const TextStyle(fontWeight:FontWeight.bold)),
       const SizedBox(height:14),Text('Pattern detected',style:Theme.of(context).textTheme.labelLarge),
@@ -860,6 +1006,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       ]),
       const SizedBox(height:6),Center(child:label('Latest observed digit • 10-second expiry • not a prediction')),
     ])),
+    predictionDisplay(),
     panel('Number Distribution Percentages',digitGrid()),
     panel('Strategy statistics',Builder(builder:(context){
       final d=sample;
