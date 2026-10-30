@@ -967,65 +967,88 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     ]));
   }
 
-  Widget analyzer() => Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
-    expertOverview(),
-    panel('Market & strategy',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      DropdownButton<String>(value:selected,isExpanded:true,items:markets.map((m)=>DropdownMenuItem(value:m,child:Text(m))).toList(),onChanged:(m){if(m!=null)_changeDigitMarket(m);}),
-      GridView.count(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),crossAxisCount:2,mainAxisSpacing:8,crossAxisSpacing:8,childAspectRatio:2.9,
-        children:['Even','Odd','Over','Under','Matches','Differs'].map((s)=>FilledButton(
-          style:FilledButton.styleFrom(backgroundColor:s=='Even'?const Color(0xFF1659E9):s=='Odd'?purple:s=='Over'?const Color(0xFF11A365):const Color(0xFFE62C34),
-          side:strategy==s?const BorderSide(color:Colors.black,width:3):BorderSide.none),
-          onPressed:()=>setState(()=>strategy=s),child:Text(s,style:const TextStyle(fontWeight:FontWeight.bold)),
-        )).toList()),
-      const SizedBox(height:8),label('Selected: $strategy • informational only'),
-      if(['Over','Under','Matches','Differs'].contains(strategy))...[
-        const SizedBox(height:8),Text('Digit barrier: $targetDigit'),
-        Slider(value:targetDigit.toDouble(),min:0,max:9,divisions:9,onChanged:(v)=>setState(()=>targetDigit=v.round())),
-      ],
-    ])),
-    panel('Live Analysis',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
-      Center(child:Text(selected,style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold))),
-      const SizedBox(height:14),Center(child:digitDial()),
-      const SizedBox(height:8),Center(child:Text(sample==null?'Load 1,000 ticks to begin':
-        digitVisible?'Live feed continues; prediction stays locked for 10 seconds':
-        'No new tick in 10 seconds • waiting for the next quote',textAlign:TextAlign.center)),
-      if(_digitError!=null)...[const SizedBox(height:8),Center(child:label(_digitError!))],
-      if(sample!=null) Center(child:label('${sample!.total} recent ticks • last observed digit')), 
-      const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&!refreshing?ticks:null,icon:const Icon(Icons.refresh),label:Text(refreshing?'Loading…':'Live ticks • refresh')),
-    ])),
-    panel('Market observations • rule-based',Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      Text('Current trend',style:Theme.of(context).textTheme.labelLarge),
-      const SizedBox(height:4),Text(best==null?'Awaiting confirmed market analysis':'${best!.symbol}: ${best!.direction} • EMA / RSI / MACD agreement',style:const TextStyle(fontWeight:FontWeight.bold)),
-      const SizedBox(height:14),Text('Pattern detected',style:Theme.of(context).textTheme.labelLarge),
-      const SizedBox(height:4),Text(sample==null?'Load live ticks to view digit distribution.':
-        'Observed ${sample!.total} ticks. ${strategy=='Even'? 'Even':strategy=='Odd'?'Odd':strategy} is descriptive, not a prediction.'),
-      const SizedBox(height:14),Row(mainAxisAlignment:MainAxisAlignment.spaceEvenly,children:[
-        FilledButton.tonal(onPressed:()=>setState(()=>strategy='Matches'),child:const Text('Matches')),
-        CircleAvatar(radius:39,backgroundColor:digitVisible && sample!.last.isEven?const Color(0xFF159F70):purple,child:Text(digitVisible?'${sample!.last}':'—',style:const TextStyle(color:Colors.white,fontSize:30,fontWeight:FontWeight.bold))),
-        FilledButton.tonal(onPressed:()=>setState(()=>strategy='Differs'),child:const Text('Differs')),
-      ]),
-      const SizedBox(height:6),Center(child:label('Latest observed digit • 10-second expiry • not a prediction')),
-    ])),
-    predictionDisplay(),
-    panel('Number Distribution Percentages',digitGrid()),
-    panel('Strategy statistics',Builder(builder:(context){
-      final d=sample;
-      if(d==null) return const Text('Connect demo and load live ticks.');
-      final percent=strategy=='Even'?[0,2,4,6,8].fold<double>(0,(v,i)=>v+d.pct(i)):
-        strategy=='Odd'?[1,3,5,7,9].fold<double>(0,(v,i)=>v+d.pct(i)):
-        strategy=='Over'?List.generate(10,(i)=>i).where((i)=>i>targetDigit).fold<double>(0,(v,i)=>v+d.pct(i)):
-        strategy=='Under'?List.generate(10,(i)=>i).where((i)=>i<targetDigit).fold<double>(0,(v,i)=>v+d.pct(i)):
-        strategy=='Matches'?d.pct(targetDigit):100-d.pct(targetDigit);
-      return Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-        Text('$strategy • ${percent.toStringAsFixed(1)}% of sampled ticks',style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold)),
-        const SizedBox(height:8),const Text('Historical frequency is not the probability of the next result.'),
-        if(strategy=='Matches'||strategy=='Differs')...[
-          const SizedBox(height:8),Text('Reference digit: $targetDigit'),
-          Slider(value:targetDigit.toDouble(),min:0,max:9,divisions:9,onChanged:(v)=>setState(()=>targetDigit=v.round())),
-        ],
-      ]);
-    })),
-  ]);
+  Widget analyzer() {
+    const blue=Color(0xFF1555E8), green=Color(0xFF098C48), red=Color(0xFFE02020);
+    Widget choice(String type,Color color) => FilledButton(
+      style:FilledButton.styleFrom(backgroundColor:color,minimumSize:const Size(0,53),
+        shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12)),
+        side:strategy==type?const BorderSide(color:Colors.black87,width:2):BorderSide.none),
+      onPressed:predictionActive?null:()=>setState(()=>strategy=type),
+      child:Text(type,style:const TextStyle(fontWeight:FontWeight.bold,fontSize:16)));
+    final matchType=['Over','Under','Matches','Differs'].contains(strategy);
+    final relevant=best!=null && best!.symbol==selected;
+    final agreement=relevant?best!.score:0.0;
+    return Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+      panel('Expert Trader',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+        Row(mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[
+          const Chip(label:Text('Deriv Connector')),
+          Chip(avatar:Icon(Icons.circle,size:12,color:api.online?green:red),label:Text(api.online?'DEMO connected':'Disconnected')),
+        ]),
+        const SizedBox(height:12),
+        const Text('Market                        Volatility',style:TextStyle(fontWeight:FontWeight.w600)),
+        Row(children:[
+          Expanded(child:DropdownButton<String>(isExpanded:true,value:strategy,
+            items:['Even','Odd','Over','Under','Matches','Differs'].map((x)=>DropdownMenuItem(value:x,child:Text(x))).toList(),
+            onChanged:predictionActive?null:(v){if(v!=null)setState(()=>strategy=v);})),
+          const SizedBox(width:12),
+          Expanded(child:DropdownButton<String>(isExpanded:true,value:selected,
+            items:markets.map((m)=>DropdownMenuItem(value:m,child:Text('Volatility ${m.substring(2)}'))).toList(),
+            onChanged:predictionActive?null:(m){if(m!=null)_changeDigitMarket(m);})),
+        ]),
+        const SizedBox(height:10),
+        const Text('Contract Type                   Duration',style:TextStyle(fontWeight:FontWeight.w600)),
+        Row(children:[
+          Expanded(child:Text(matchType?'Digit $strategy':'Digits $strategy',style:const TextStyle(fontSize:16))),
+          const SizedBox(width:14),const Expanded(child:Text('10 seconds (simulation)',style:TextStyle(fontSize:13))),
+        ]),
+        if(matchType)...[const SizedBox(height:8),Text('Reference digit / barrier: $targetDigit'),
+          Slider(value:targetDigit.toDouble(),min:0,max:9,divisions:9,
+            onChanged:predictionActive?null:(v)=>setState(()=>targetDigit=v.round()))],
+      ])),
+      panel('Live Market',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+        Center(child:Text('Volatility ${selected.substring(2)} Index',style:const TextStyle(fontWeight:FontWeight.w700))),
+        const SizedBox(height:6),
+        Center(child:Text(sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:36,color:blue,fontWeight:FontWeight.w900))),
+        Center(child:Text(api.online?'● Live Data Connected':'● Disconnected',style:TextStyle(color:api.online?green:red))),
+        const SizedBox(height:12),Row(children:[
+          Expanded(child:FilledButton(style:FilledButton.styleFrom(backgroundColor:red),onPressed:liveDigits?_stopLiveDigits:null,child:const Text('Stop Analysis'))),
+          const SizedBox(width:8),Expanded(child:FilledButton(style:FilledButton.styleFrom(backgroundColor:blue),onPressed:api.online&&!refreshing?ticks:null,child:Text(refreshing?'Loading…':'Refresh'))),
+        ]),
+      ])),
+      panel('Strategy Selector',Column(children:[
+        Row(children:[Expanded(child:choice('Even',blue)),const SizedBox(width:10),Expanded(child:choice('Odd',purple))]),
+        const SizedBox(height:10),
+        Row(children:[Expanded(child:choice('Over',green)),const SizedBox(width:10),Expanded(child:choice('Under',red))]),
+      ])),
+      panel('AI Market Analyzer',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+        const Text('Current Trend',style:TextStyle(fontSize:13,color:Color(0xFF5C526C))),
+        const SizedBox(height:5),Text(relevant?(best!.direction=='CALL'?'Uptrend ↗':'Downtrend ↘'):'Awaiting confirmed analysis',style:const TextStyle(fontSize:17,fontWeight:FontWeight.bold)),
+        const Divider(height:26),
+        const Text('Indicator Agreement',style:TextStyle(fontSize:13,color:Color(0xFF5C526C))),
+        const SizedBox(height:5),Text(relevant?'${agreement.toStringAsFixed(0)}/100':'No qualified signal',style:const TextStyle(fontSize:19,fontWeight:FontWeight.bold,color:purple)),
+        const Divider(height:26),
+        const Text('Pattern Detected',style:TextStyle(fontSize:13,color:Color(0xFF5C526C))),
+        const SizedBox(height:6),Text(relevant?best!.detail:'No confirmed setup. Observe the market or run Expert Analysis.'),
+        const SizedBox(height:7),const Text('Agreement is NOT a verified win probability.',style:TextStyle(fontSize:12,color:Colors.black54)),
+        const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&!scanning?scan:null,icon:const Icon(Icons.psychology),label:const Text('Start Expert Analysis')),
+      ])),
+      panel('Digit Prediction',Column(children:[
+        Row(children:[
+          Expanded(child:choice('Matches',blue)),
+          const SizedBox(width:10),
+          CircleAvatar(radius:37,backgroundColor:purple,child:Text(revealedDigit!=null?'$revealedDigit':sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:34,color:Colors.white,fontWeight:FontWeight.bold))),
+          const SizedBox(width:10),Expanded(child:choice('Differs',blue)),
+        ]),
+        const SizedBox(height:8),Text(predictionActive?'${predictionRemaining}s remaining':predictionOutcome,textAlign:TextAlign.center),
+        const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&liveDigits&&sample!=null&&!predictionActive?startPrediction:null,
+          icon:const Icon(Icons.timer),label:Text(predictionActive?'Prediction locked…':'Predict • 10-second countdown')),
+        const SizedBox(height:6),const Text('Simulated result, not a purchased Deriv contract.',style:TextStyle(fontSize:12,color:Colors.black54)),
+      ])),
+      panel('Number Distribution & Percentages',digitGrid()),
+      predictionDisplay(),
+      expertOverview(),
+    ]);
+  }
 
   Widget digitDial() {
     final visible=digitVisible;
