@@ -312,7 +312,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   String? lockedMarket;
   int? lockedBarrier;
   int? revealedDigit;
-  String predictionOutcome='Tap Predict to start a 10-second observation.';
+  String predictionOutcome='Tap Matches or Differs to start a 10-second observation.';
   final Map<String,List<int>> predictionStats={}; // [correct, evaluated]
   int predictionRound=0;
   bool get predictionActive => predictionDeadline!=null && revealedDigit==null;
@@ -1026,11 +1026,11 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
 
   Widget analyzer() {
     const blue=Color(0xFF1555E8), green=Color(0xFF098C48), red=Color(0xFFE02020);
-    Widget choice(String type,Color color) => FilledButton(
+    Widget choice(String type,Color color,{bool startOnTap=false}) => FilledButton(
       style:FilledButton.styleFrom(backgroundColor:color,minimumSize:const Size(0,53),
         shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12)),
         side:strategy==type?const BorderSide(color:Colors.black87,width:2):BorderSide.none),
-      onPressed:predictionActive?null:()=>setState(()=>strategy=type),
+      onPressed:predictionActive?null:(){setState(()=>strategy=type);if(startOnTap) startPrediction();},
       child:Text(type,style:const TextStyle(fontWeight:FontWeight.bold,fontSize:16)));
     final matchType=['Over','Under','Matches','Differs'].contains(strategy);
     final relevant=best!=null && best!.symbol==selected;
@@ -1084,12 +1084,18 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
         const SizedBox(height:8),
         Text('Market: $selected  •  ${api.online?'Demo connected':'Disconnected'}',style:const TextStyle(fontWeight:FontWeight.w600)),
         const SizedBox(height:8),
-        Row(children:[Expanded(child:choice('Matches',blue)),const SizedBox(width:10),
-          CircleAvatar(radius:34,backgroundColor:purple,child:Text(sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:32,color:Colors.white,fontWeight:FontWeight.bold))),
-          const SizedBox(width:10),Expanded(child:choice('Differs',blue))]),
+        Row(children:[Expanded(child:choice('Matches',blue,startOnTap:true)),const SizedBox(width:10),
+          SizedBox(width:78,height:78,child:Stack(alignment:Alignment.center,children:[
+            SizedBox(width:76,height:76,child:CircularProgressIndicator(
+              value:predictionActive?predictionRemaining/10:1,
+              strokeWidth:5,backgroundColor:const Color(0xFFECE3FA),color:purple)),
+            CircleAvatar(radius:32,backgroundColor:purple,child:Text(
+              revealedDigit!=null?'$revealedDigit':sample==null?'—':'${sample!.last}',
+              style:const TextStyle(fontSize:32,color:Colors.white,fontWeight:FontWeight.bold))),
+          ])),const SizedBox(width:10),Expanded(child:choice('Differs',blue,startOnTap:true))]),
         const SizedBox(height:6),
         Center(child:Text(predictionActive?'${predictionRemaining}s • prediction locked':
-          revealedDigit!=null?'Result: $predictionOutcome':'10-second prediction • choose strategy and tap Predict below',
+          revealedDigit!=null?'Result: $predictionOutcome':'Tap Matches or Differs to begin a 10-second countdown',
           textAlign:TextAlign.center,style:const TextStyle(fontSize:12))),
         const Divider(height:26),
         const Text('CURRENT TREND',style:TextStyle(fontSize:13,color:Color(0xFF5C526C),fontWeight:FontWeight.bold)),
@@ -1108,9 +1114,9 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
         const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&!scanning?() async {if(sample==null) await ticks(); if(api.online&&!scanning) await scan();}:null,icon:const Icon(Icons.psychology),label:Text(scanning?'Analysing…':'Start Expert Analysis')),
       ])),
       panel('Digit Prediction',Column(children:[
-        CircleAvatar(radius:43,backgroundColor:purple,child:Text(predictionActive?'$predictionRemaining':revealedDigit!=null?'$revealedDigit':sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:38,color:Colors.white,fontWeight:FontWeight.bold))),
-        const SizedBox(height:8),Text(predictionActive?'PREDICTION LOCKED • COUNTDOWN':revealedDigit!=null?'REVEALED MARKET DIGIT':'LATEST MARKET DIGIT',style:const TextStyle(fontWeight:FontWeight.bold)),
-        const SizedBox(height:8),Text(predictionActive?'${predictionRemaining}s remaining':predictionOutcome,textAlign:TextAlign.center),
+        CircleAvatar(radius:43,backgroundColor:purple,child:Text(revealedDigit!=null?'$revealedDigit':sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:38,color:Colors.white,fontWeight:Bold))),
+        const SizedBox(height:8),Text(predictionActive?'LIVE DIGIT • COUNTDOWN RUNNING':revealedDigit!=null?'REVEALED MARKET DIGIT':'LATEST MARKET DIGIT',style:const TextStyle(fontWeight:FontWeight.bold)),
+        const SizedBox(height:8),Text(predictionActive?'${predictionRemaining}s remaining • ${lockedPrediction ?? strategy}':predictionOutcome,textAlign:TextAlign.center),
         const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&liveDigits&&sample!=null&&!predictionActive?startPrediction:null,
           icon:const Icon(Icons.timer),label:Text(predictionActive?'Prediction locked…':'Predict • 10-second countdown')),
         const SizedBox(height:6),const Text('Simulated result, not a purchased Deriv contract.',style:TextStyle(fontSize:12,color:Colors.black54)),
