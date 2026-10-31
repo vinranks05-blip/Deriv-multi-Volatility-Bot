@@ -304,6 +304,8 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   final Set<String> tradedSignals={};
   DateTime? lastOrderAt;
 
+  String? livePrice;
+  bool resumeLiveOnForeground=false;
   String strategy='Even';
   DateTime? predictionDeadline;
   String? lockedPrediction;
@@ -362,6 +364,47 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   bool streamingTicks=false;
   bool liveDigits=false;
   final Queue<int> _recentDigits=Queue<int>();
+  final Queue<double> _recentPrices=Queue<double>();
+  void _recordPrice(dynamic raw) {
+    final price=double.tryParse("$raw");
+    if(price==null || !price.isFinite) return;
+    _recentPrices.addLast(price);
+    while(_recentPrices.length>240) { _recentPrices.removeFirst(); }
+  }
+  String get liveTrend {
+    if(_recentPrices.length<20) return "Collecting live prices";
+    final p=_recentPrices.toList();
+    final short=p.sublist(p.length-10).reduce((a,b)=>a+b)/10;
+    final long=p.sublist(p.length-20).reduce((a,b)=>a+b)/20;
+    final movement=p.skip(1).toList().asMap().entries.fold<double>(0,(sum,e)=>sum+(e.value-p[e.key]).abs())/(p.length-1);
+    if(movement==0) return "Sideways ↔";
+    final difference=(short-long)/movement;
+    if(difference>0.65) return "Uptrend ↗";
+    if(difference< -0.65) return "Downtrend ↘";
+    return "Sideways ↔";
+  }
+  int? get liveAgreement {
+    if(_recentPrices.length<20) return null;
+    final p=_recentPrices.toList();
+    final delta=p.last-p[p.length-10];
+    final up=p.skip(1).toList().asMap().entries.where((e)=>e.value>p[e.key]).length;
+    final down=p.skip(1).toList().asMap().entries.where((e)=>e.value<p[e.key]).length;
+    final total=up+down;
+    if(total==0) return 0;
+    final direction=liveTrend.startsWith("Up")?1:liveTrend.startsWith("Down")?-1:0;
+    final votes=direction==1?up:direction==-1?down:total~/2;
+    final alignment=(votes/total*100).round();
+    return ((alignment+(direction==0?40:delta.sign==direction?80:20))/2).round().clamp(0,100);
+  }
+  String get livePattern {
+    if(_recentPrices.length<20) return "Waiting for at least 20 prices";
+    final p=_recentPrices.toList();
+    final a=p.sublist(p.length-20,p.length-10);
+    final b=p.sublist(p.length-10);
+    if(b.reduce(max)>a.reduce(max) && b.reduce(min)>a.reduce(min)) return "Higher highs and higher lows";
+    if(b.reduce(max)<a.reduce(max) && b.reduce(min)<a.reduce(min)) return "Lower highs and lower lows";
+    return "Mixed price structure • wait for confirmation";
+  }
   int? _latestTickEpoch;
   DateTime? _digitReceivedAt;
   String? _digitError;
@@ -387,7 +430,14 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
   }
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed) { _stopLiveDigits(); if (scanning) stop('Paused in background'); }
+    if (state != AppLifecycleState.resumed) {
+      resumeLiveOnForeground=liveDigits;
+      _stopLiveDigits();
+      if (scanning) stop('Paused in background');
+    } else if (resumeLiveOnForeground && api.online && !refreshing) {
+      resumeLiveOnForeground=false;
+      unawaited(ticks());
+    }
   }
   @override
   void dispose() {
@@ -684,7 +734,8 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
 
   void _changeDigitMarket(String market) {
     _stopLiveDigits();
-    setState(() {selected=market;sample=null;_recentDigits.clear();_digitError=null;});
+    setState(() {selected=market;sample=null;livePrice=null;_recentDigits.clear();_recentPrices.clear();_digitError=null;});
+    if(api.online) unawaited(ticks());
   }
 
   int? _digitFromPrice(dynamic raw,int places) {
@@ -713,6 +764,8 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     final counts = List<int>.filled(10, 0);
     for (final n in _recentDigits) { counts[n]++; }
     setState(() {
+      _recordPrice(quote);
+      livePrice = double.tryParse('$quote')?.toStringAsFixed(places) ?? '$quote';
       sample = DigitSample(counts, digit, places, _recentDigits.length);
       _digitReceivedAt = DateTime.now();
       _digitError = null;
@@ -743,6 +796,8 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       final counts=List<int>.filled(10,0);
       for(final n in _recentDigits) { counts[n]++; }
       setState(() {
+        _recordPrice(quote);
+        livePrice=double.tryParse('$quote')?.toStringAsFixed(places) ?? '$quote';
         sample=DigitSample(counts,digit,places,_recentDigits.length);
         _digitReceivedAt=DateTime.now();
         _digitError=null;
@@ -786,7 +841,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
     _stopLiveDigits();
     predictionDeadline=null; revealedDigit=null; lockedPrediction=null;
     final requestedMarket=selected;
-    setState(() { refreshing=true; sample=null; status='Loading live tick history…'; });
+    setState(() { refreshing=true; sample=null; livePrice=null; status='Loading live tick history…'; });
     try {
       final response=await api.request({'ticks_history':selected,'end':'latest','style':'ticks','count':1000});
       final data=response['history'];
@@ -796,7 +851,9 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       final counts=List<int>.filled(10,0);
       var total=0, last=0;
       _recentDigits.clear();
+      _recentPrices.clear();
       for (final price in raw) {
+        _recordPrice(price);
         final digit=_digitFromPrice(price,places);
         if (digit==null) continue;
         counts[digit]++; last=digit; total++;
@@ -804,7 +861,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       }
       if (total==0) throw StateError('No valid ticks returned');
       if (!mounted || selected!=requestedMarket || !api.online) return;
-      setState(() { sample=DigitSample(counts,last,places,total); status='Loaded $total $selected ticks • live updates enabled'; });
+      setState(() { sample=DigitSample(counts,last,places,total); livePrice=double.tryParse('${raw.last}')?.toStringAsFixed(places) ?? '${raw.last}'; status='Loaded $total $selected ticks • live updates enabled'; });
       _startLiveDigits();
     } catch (e) { note('Tick analysis failed: $e'); }
     finally { if (mounted) setState(() => refreshing=false); }
@@ -977,7 +1034,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       child:Text(type,style:const TextStyle(fontWeight:FontWeight.bold,fontSize:16)));
     final matchType=['Over','Under','Matches','Differs'].contains(strategy);
     final relevant=best!=null && best!.symbol==selected;
-    final agreement=relevant?best!.score:0.0;
+    final agreement=liveAgreement; // Show the current market reading independently of trade qualification.
     return Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
       panel('Expert Trader',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
         Row(mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[
@@ -1008,45 +1065,47 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
       panel('Live Market',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
         Center(child:Text('Volatility ${selected.substring(2)} Index',style:const TextStyle(fontWeight:FontWeight.w700))),
         const SizedBox(height:6),
-        Center(child:Text(sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:36,color:blue,fontWeight:FontWeight.w900))),
-        Center(child:Text(api.online?'● Live Data Connected':'● Disconnected',style:TextStyle(color:api.online?green:red))),
+        Center(child:Text(livePrice??'—',style:const TextStyle(fontSize:36,color:blue,fontWeight:FontWeight.w900))),
+        Center(child:Text(!api.online?'● Disconnected':sample==null?'● Waiting for market data':liveDigits?'● Live Data Connected':'● Feed paused',style:TextStyle(color:api.online&&liveDigits&&sample!=null?green:red))),
         const SizedBox(height:12),Row(children:[
           Expanded(child:FilledButton(style:FilledButton.styleFrom(backgroundColor:red),onPressed:liveDigits?_stopLiveDigits:null,child:const Text('Stop Analysis'))),
-          const SizedBox(width:8),Expanded(child:FilledButton(style:FilledButton.styleFrom(backgroundColor:blue),onPressed:api.online&&!refreshing?ticks:null,child:Text(refreshing?'Loading…':'Refresh'))),
+          const SizedBox(width:8),Expanded(child:FilledButton(style:FilledButton.styleFrom(backgroundColor:blue),onPressed:api.online&&!refreshing?ticks:null,child:Text(refreshing?'Loading…':sample==null?'Load live data':'Refresh'))),
         ]),
       ])),
       panel('Strategy Selector',Column(children:[
         Row(children:[Expanded(child:choice('Even',blue)),const SizedBox(width:10),Expanded(child:choice('Odd',purple))]),
         const SizedBox(height:10),
         Row(children:[Expanded(child:choice('Over',green)),const SizedBox(width:10),Expanded(child:choice('Under',red))]),
+        const SizedBox(height:10),
+        Row(children:[Expanded(child:choice('Matches',blue)),const SizedBox(width:10),Expanded(child:choice('Differs',purple))]),
       ])),
       panel('AI Market Analyzer',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
-        const Text('Current Trend',style:TextStyle(fontSize:13,color:Color(0xFF5C526C))),
-        const SizedBox(height:5),Text(relevant?(best!.direction=='CALL'?'Uptrend ↗':'Downtrend ↘'):'Awaiting confirmed analysis',style:const TextStyle(fontSize:17,fontWeight:FontWeight.bold)),
+        const Text('CURRENT TREND',style:TextStyle(fontSize:13,color:Color(0xFF5C526C),fontWeight:FontWeight.bold)),
+        const SizedBox(height:5),Text(!api.online?'Connect demo to analyse':sample==null?'Load market data to begin':liveTrend,style:const TextStyle(fontSize:17,fontWeight:FontWeight.bold)),
         const Divider(height:26),
-        const Text('Indicator Agreement',style:TextStyle(fontSize:13,color:Color(0xFF5C526C))),
-        const SizedBox(height:5),Text(relevant?'${agreement.toStringAsFixed(0)}/100':'No qualified signal',style:const TextStyle(fontSize:19,fontWeight:FontWeight.bold,color:purple)),
+        const Text('CONFIDENCE LEVEL • INDICATOR AGREEMENT',style:TextStyle(fontSize:13,color:Color(0xFF5C526C),fontWeight:FontWeight.bold)),
+        const SizedBox(height:5),Text(agreement==null?'Collecting live prices':'$agreement%',style:const TextStyle(fontSize:24,fontWeight:FontWeight.bold,color:purple)),
+        const SizedBox(height:5),LinearProgressIndicator(value:(agreement??0)/100,minHeight:9,borderRadius:BorderRadius.circular(8),backgroundColor:const Color(0xFFECE3FA),color:purple),
         const Divider(height:26),
-        const Text('Pattern Detected',style:TextStyle(fontSize:13,color:Color(0xFF5C526C))),
-        const SizedBox(height:6),Text(relevant?best!.detail:'No confirmed setup. Observe the market or run Expert Analysis.'),
-        const SizedBox(height:7),const Text('Agreement is NOT a verified win probability.',style:TextStyle(fontSize:12,color:Colors.black54)),
-        const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&!scanning?scan:null,icon:const Icon(Icons.psychology),label:const Text('Start Expert Analysis')),
+        const Text('PATTERN DETECTED',style:TextStyle(fontSize:13,color:Color(0xFF5C526C),fontWeight:FontWeight.bold)),
+        const SizedBox(height:6),Text(sample==null?'Load live market data':livePattern),
+        const SizedBox(height:7),const Text('Live score describes price-direction agreement, NOT predicted win probability.',style:TextStyle(fontSize:12,color:Colors.black54)),
+        const SizedBox(height:10),const Text('RECOMMENDED STRATEGY',style:TextStyle(fontSize:13,fontWeight:FontWeight.bold,color:Color(0xFF5C526C))),
+        const SizedBox(height:4),Text(sample==null?'WAIT • load live prices':liveTrend.startsWith('Sideways')?'NO TRADE • sideways market':relevant?'${best!.direction} • verify contract and risk':'OBSERVE • no qualified trade signal',style:const TextStyle(fontSize:17,fontWeight:FontWeight.w800,color:purple)),
+        const SizedBox(height:5),const Text('Digit strategies are separate from price-trend signals. No digit outcome is guaranteed.',style:TextStyle(fontSize:12,color:Colors.black54)),
+        const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&!scanning?() async {if(sample==null) await ticks(); if(api.online&&!scanning) await scan();}:null,icon:const Icon(Icons.psychology),label:Text(scanning?'Analysing…':'Start Expert Analysis')),
       ])),
       panel('Digit Prediction',Column(children:[
-        Row(children:[
-          Expanded(child:choice('Matches',blue)),
-          const SizedBox(width:10),
-          CircleAvatar(radius:37,backgroundColor:purple,child:Text(revealedDigit!=null?'$revealedDigit':sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:34,color:Colors.white,fontWeight:FontWeight.bold))),
-          const SizedBox(width:10),Expanded(child:choice('Differs',blue)),
-        ]),
+        CircleAvatar(radius:43,backgroundColor:purple,child:Text(predictionActive?'$predictionRemaining':revealedDigit!=null?'$revealedDigit':sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:38,color:Colors.white,fontWeight:FontWeight.bold))),
+        const SizedBox(height:8),Text(predictionActive?'PREDICTION LOCKED • COUNTDOWN':revealedDigit!=null?'REVEALED MARKET DIGIT':'LATEST MARKET DIGIT',style:const TextStyle(fontWeight:FontWeight.bold)),
         const SizedBox(height:8),Text(predictionActive?'${predictionRemaining}s remaining':predictionOutcome,textAlign:TextAlign.center),
         const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&liveDigits&&sample!=null&&!predictionActive?startPrediction:null,
           icon:const Icon(Icons.timer),label:Text(predictionActive?'Prediction locked…':'Predict • 10-second countdown')),
         const SizedBox(height:6),const Text('Simulated result, not a purchased Deriv contract.',style:TextStyle(fontSize:12,color:Colors.black54)),
       ])),
       panel('Number Distribution & Percentages',digitGrid()),
-      predictionDisplay(),
-      expertOverview(),
+      // Prediction and market information are presented once, above.
+
     ]);
   }
 
