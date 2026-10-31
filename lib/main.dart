@@ -1002,8 +1002,23 @@ class _TradingScreenState
     );
   }
 
-  Widget panel(Widget child) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(22),
-      decora
+
+Widget panel(Widget child) {
+  return Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(22),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(30),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.12),
+          blurRadius: 5,
+          offset: const Offset(0, 2),
+        ),
+      ],
+    ),
+    child: child,
+  );
+}
+  
