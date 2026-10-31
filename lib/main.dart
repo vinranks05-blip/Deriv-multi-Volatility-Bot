@@ -1079,7 +1079,19 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
         const SizedBox(height:10),
         Row(children:[Expanded(child:choice('Matches',blue)),const SizedBox(width:10),Expanded(child:choice('Differs',purple))]),
       ])),
-      panel('AI Market Analyzer',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+      panel('Expert Analysis Tool',Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+        const Text('QUICK STRATEGY • LIVE MARKET ANALYSIS',style:TextStyle(fontSize:13,fontWeight:FontWeight.bold,color:purple)),
+        const SizedBox(height:8),
+        Text('Market: $selected  •  ${api.online?'Demo connected':'Disconnected'}',style:const TextStyle(fontWeight:FontWeight.w600)),
+        const SizedBox(height:8),
+        Row(children:[Expanded(child:choice('Matches',blue)),const SizedBox(width:10),
+          CircleAvatar(radius:34,backgroundColor:purple,child:Text(sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:32,color:Colors.white,fontWeight:FontWeight.bold))),
+          const SizedBox(width:10),Expanded(child:choice('Differs',blue))]),
+        const SizedBox(height:6),
+        Center(child:Text(predictionActive?'${predictionRemaining}s • prediction locked':
+          revealedDigit!=null?'Result: $predictionOutcome':'10-second prediction • choose strategy and tap Predict below',
+          textAlign:TextAlign.center,style:const TextStyle(fontSize:12))),
+        const Divider(height:26),
         const Text('CURRENT TREND',style:TextStyle(fontSize:13,color:Color(0xFF5C526C),fontWeight:FontWeight.bold)),
         const SizedBox(height:5),Text(!api.online?'Connect demo to analyse':sample==null?'Load market data to begin':liveTrend,style:const TextStyle(fontSize:17,fontWeight:FontWeight.bold)),
         const Divider(height:26),
