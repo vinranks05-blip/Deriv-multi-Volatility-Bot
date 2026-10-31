@@ -1114,7 +1114,7 @@ class _LabHomeState extends State<LabHome> with WidgetsBindingObserver {
         const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&!scanning?() async {if(sample==null) await ticks(); if(api.online&&!scanning) await scan();}:null,icon:const Icon(Icons.psychology),label:Text(scanning?'Analysing…':'Start Expert Analysis')),
       ])),
       panel('Digit Prediction',Column(children:[
-        CircleAvatar(radius:43,backgroundColor:purple,child:Text(revealedDigit!=null?'$revealedDigit':sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:38,color:Colors.white,fontWeight:Bold))),
+        CircleAvatar(radius:43,backgroundColor:purple,child:Text(revealedDigit!=null?'$revealedDigit':sample==null?'—':'${sample!.last}',style:const TextStyle(fontSize:38,color:Colors.white,fontWeight:FontWeight.bold))),
         const SizedBox(height:8),Text(predictionActive?'LIVE DIGIT • COUNTDOWN RUNNING':revealedDigit!=null?'REVEALED MARKET DIGIT':'LATEST MARKET DIGIT',style:const TextStyle(fontWeight:FontWeight.bold)),
         const SizedBox(height:8),Text(predictionActive?'${predictionRemaining}s remaining • ${lockedPrediction ?? strategy}':predictionOutcome,textAlign:TextAlign.center),
         const SizedBox(height:12),FilledButton.icon(onPressed:api.online&&liveDigits&&sample!=null&&!predictionActive?startPrediction:null,
