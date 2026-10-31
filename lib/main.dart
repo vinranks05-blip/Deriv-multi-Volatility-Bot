@@ -18,9 +18,16 @@ class V8App extends StatelessWidget {
   const V8App({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-    debugShowCheckedModeBanner: false,
+    theme: ThemeData(
+  useMaterial3: true,
+  brightness: Brightness.dark,
+  colorScheme: ColorScheme.fromSeed(
+    seedColor: purple,
+    brightness: Brightness.dark,
+  ),
+  scaffoldBackgroundColor: const Color(0xFF0B1020),
+),
     title: 'V8 PRO • Expert Trader',
-    theme: ThemeData(useMaterial3: true, colorScheme: ColorScheme.fromSeed(seedColor: purple), brightness: Brightness.dark, scaffoldBackgroundColor: navy),
     home: const LabHome(),
   );
 }
