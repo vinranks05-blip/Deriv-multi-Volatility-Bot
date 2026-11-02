@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const ExpertApp());
 const symbols = ['R_10', 'R_25', 'R_50', 'R_75', 'R_100'];
@@ -17,7 +18,7 @@ class ExpertApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
     debugShowCheckedModeBanner: false,
-    title: 'V9 Expert Trader',
+    title: 'V10 Expert Trader',
     theme: ThemeData(useMaterial3: true, brightness: Brightness.dark,
       colorScheme: ColorScheme.fromSeed(seedColor: accent, brightness: Brightness.dark),
       scaffoldBackgroundColor: bg),
@@ -136,6 +137,144 @@ class Broker {
   }
 }
 
+// Indicators use sampled TICKS, not time-based candles. They are useful
+// diagnostics for direction, not evidence of next-digit predictability.
+class TickIndicators {
+  final double ema20, ema50, rsi14, macd, macdSignal, atr14;
+  final String direction;
+  final int agreement;
+  const TickIndicators(this.ema20, this.ema50, this.rsi14,
+      this.macd, this.macdSignal, this.atr14, this.direction, this.agreement);
+
+  static List<double> emaSeries(List<double> xs, int period) {
+    final output = <double>[];
+    final alpha = 2.0 / (period + 1);
+    var value = xs.first;
+    for (final x in xs) {
+      value += alpha * (x - value);
+      output.add(value);
+    }
+    return output;
+  }
+
+  static TickIndicators? calculate(Iterable<double> prices) {
+    final p = prices.toList();
+    if (p.length < 60) return null;
+    final e20 = emaSeries(p, 20);
+    final e50 = emaSeries(p, 50);
+    final e12 = emaSeries(p, 12);
+    final e26 = emaSeries(p, 26);
+    final macds = List<double>.generate(p.length, (i) => e12[i] - e26[i]);
+    final signal = emaSeries(macds, 9);
+    var gains = 0.0;
+    var losses = 0.0;
+    var absoluteMove = 0.0;
+    for (var i = p.length - 14; i < p.length; i++) {
+      final change = p[i] - p[i - 1];
+      gains += max(0.0, change);
+      losses += max(0.0, -change);
+      absoluteMove += change.abs();
+    }
+    final rsi = losses == 0 ? (gains == 0 ? 50.0 : 100.0)
+        : 100.0 - 100.0 / (1.0 + gains / losses);
+    final atr = absoluteMove / 14; // Mean absolute tick change; NOT candle ATR.
+    final upVotes = [e20.last > e50.last, e20.last > e20[e20.length - 2],
+      macds.last > signal.last, rsi > 50, p.last > e20.last]
+        .where((v) => v).length;
+    final downVotes = [e20.last < e50.last, e20.last < e20[e20.length - 2],
+      macds.last < signal.last, rsi < 50, p.last < e20.last]
+        .where((v) => v).length;
+    final up = upVotes >= 4 && upVotes > downVotes;
+    final down = downVotes >= 4 && downVotes > upVotes;
+    final agreement = max(upVotes, downVotes) * 20;
+    return TickIndicators(e20.last, e50.last, rsi, macds.last,
+        signal.last, atr, up ? 'UP' : down ? 'DOWN' : 'WAIT', agreement);
+  }
+}
+
+// Real closed 1-minute OHLC bars, aggregated into completed 5m and 15m bars.
+class PriceBar {
+  final int epoch;
+  final double open, high, low, close;
+  const PriceBar(this.epoch, this.open, this.high, this.low, this.close);
+  static PriceBar? fromApi(dynamic raw) {
+    if (raw is! Map) return null;
+    final t = int.tryParse('${raw['epoch']}');
+    final o = double.tryParse('${raw['open']}');
+    final h = double.tryParse('${raw['high']}');
+    final l = double.tryParse('${raw['low']}');
+    final c = double.tryParse('${raw['close']}');
+    if (t == null || o == null || h == null || l == null || c == null ||
+        ![o,h,l,c].every((v) => v.isFinite)) return null;
+    return PriceBar(t,o,h,l,c);
+  }
+}
+
+List<PriceBar> aggregateClosed(List<PriceBar> oneMinute, int minutes) {
+  final groups = <int,List<PriceBar>>{};
+  for (final b in oneMinute) {
+    final start = (b.epoch ~/ (minutes*60)) * minutes*60;
+    groups.putIfAbsent(start, () => []).add(b);
+  }
+  final result = <PriceBar>[];
+  for (final entry in groups.entries) {
+    final g = entry.value..sort((a,b) => a.epoch.compareTo(b.epoch));
+    if (g.length != minutes || g.first.epoch != entry.key ||
+        g.last.epoch != entry.key + (minutes-1)*60) continue;
+    result.add(PriceBar(entry.key, g.first.open,
+      g.map((b)=>b.high).reduce(max), g.map((b)=>b.low).reduce(min), g.last.close));
+  }
+  result.sort((a,b)=>a.epoch.compareTo(b.epoch));
+  return result;
+}
+
+class CandleReading {
+  final String direction;
+  final double rsi, atr, macd, signal;
+  final bool extended;
+  const CandleReading(this.direction,this.rsi,this.atr,this.macd,this.signal,this.extended);
+  static CandleReading? calculate(List<PriceBar> bars) {
+    if (bars.length < 55) return null;
+    final prices = bars.map((b)=>b.close).toList();
+    final ema20 = TickIndicators.emaSeries(prices,20);
+    final ema50 = TickIndicators.emaSeries(prices,50);
+    final e12 = TickIndicators.emaSeries(prices,12);
+    final e26 = TickIndicators.emaSeries(prices,26);
+    final macds = List<double>.generate(prices.length,(i)=>e12[i]-e26[i]);
+    final signal = TickIndicators.emaSeries(macds,9).last;
+    var gains=0.0, losses=0.0, tr=0.0;
+    for (var i=bars.length-14; i<bars.length; i++) {
+      final change=prices[i]-prices[i-1];
+      gains+=max(0,change); losses+=max(0,-change);
+      tr+=max(bars[i].high-bars[i].low,
+        max((bars[i].high-prices[i-1]).abs(),(bars[i].low-prices[i-1]).abs()));
+    }
+    final rsi=losses==0 ? (gains==0 ? 50.0 : 100.0) : 100-100/(1+gains/losses);
+    final atr=tr/14;
+    if (!atr.isFinite || atr<=0) return null;
+    final first=bars.sublist(bars.length-12,bars.length-6);
+    final second=bars.sublist(bars.length-6);
+    final higher=second.map((b)=>b.high).reduce(max)>first.map((b)=>b.high).reduce(max) &&
+      second.map((b)=>b.low).reduce(min)>first.map((b)=>b.low).reduce(min);
+    final lower=second.map((b)=>b.high).reduce(max)<first.map((b)=>b.high).reduce(max) &&
+      second.map((b)=>b.low).reduce(min)<first.map((b)=>b.low).reduce(min);
+    final up=ema20.last>ema50.last && ema20.last>ema20[ema20.length-2] &&
+      prices.last>ema20.last && macds.last>signal && rsi>=51 && rsi<=70 && higher;
+    final down=ema20.last<ema50.last && ema20.last<ema20[ema20.length-2] &&
+      prices.last<ema20.last && macds.last<signal && rsi>=30 && rsi<=49 && lower;
+    final extended=(prices.last-ema20.last).abs()/atr>2.1 || (ema20.last-ema50.last).abs()/atr>3;
+    return CandleReading(up?'UP':down?'DOWN':'WAIT',rsi,atr,macds.last,signal,extended);
+  }
+}
+
+class MultiFrameReading {
+  final CandleReading one, five, fifteen;
+  final DateTime updated;
+  const MultiFrameReading(this.one,this.five,this.fifteen,this.updated);
+  String get direction => !one.extended && !five.extended &&
+    one.direction==five.direction && five.direction==fifteen.direction ? one.direction : 'WAIT';
+}
+
 class MarketState {
   final String symbol;
   final Queue<int> digits = Queue<int>();
@@ -165,6 +304,7 @@ class MarketState {
     final d = frequentDigit;
     return d == null ? 0 : counts[d] * 100 / total;
   }
+  TickIndicators? get indicators => TickIndicators.calculate(prices);
   String get trend {
     if (prices.length < 30) return 'COLLECTING';
     final p = prices.toList();
@@ -222,7 +362,17 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
   final states = {for (final s in symbols) s: MarketState(s)};
   final observations = <Observation>[];
   final trades = <TradeRecord>[];
+  final candleReadings = <String, MultiFrameReading>{};
+  final candleErrors = <String,String>{};
+  Timer? persistenceClock;
+  bool restoring = true;
+  bool recordsDirty = false;
   Timer? clock;
+  Timer? reconnectTimer;
+  bool reconnectEnabled = false;
+  int reconnectAttempts = 0;
+  bool _manualDisconnect = false;
+  bool _resumePending = false;
   bool connecting = false, loading = false, orderBusy = false, unresolvedOrder = false;
   bool foreground = true, emergencyStopped = false;
   String mode = 'demo';
@@ -234,30 +384,121 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
   DateTime? lastOrder;
   final precision = <String, int>{};
   final seen = <String, String>{};
+  // Independent automatic observations. These NEVER place broker orders.
+  bool automaticObservations = false;
+  final Map<String, DateTime> nextCycle = {};
+  final Map<String, String> signalStrategy = {};
+  final Map<String, int> signalBarrier = {};
+  static const cycleLength = Duration(seconds: 10);
+  static const minimumHistory = 100;
+  String strategyFor(MarketState m) {
+    // Alternating categories permit separately measured strategies; no claim of edge.
+    final n = observations.where((o) => o.market == m.symbol).length;
+    return const ['Matches', 'Differs', 'Even', 'Odd', 'Over', 'Under'][n % 6];
+  }
+  int barrierFor(MarketState m, String type) {
+    if (type == 'Matches' || type == 'Differs') return m.frequentDigit ?? 5;
+    if (type == 'Over' || type == 'Under') return 4;
+    return 0;
+  }
+  Observation? activeFor(String symbol) {
+    for (final o in observations) {
+      if (o.market == symbol && o.pending) return o;
+    }
+    return null;
+  }
+  void runAutomaticCycles() {
+    for (final o in observations.where((o) => o.pending && DateTime.now().difference(o.deadline).inSeconds > 20)) {
+      o.status = 'EXPIRED • NO LIVE TICK'; recordsDirty = true;
+    }
+    if (!automaticObservations || !foreground || !broker.connected || emergencyStopped) return;
+    final now = DateTime.now();
+    var changed = false;
+    for (final symbol in symbols) {
+      final m = states[symbol]!;
+      if (!m.fresh || m.total < minimumHistory || activeFor(symbol) != null) continue;
+      if (now.isBefore(nextCycle[symbol] ?? DateTime.fromMillisecondsSinceEpoch(0))) continue;
+      final type = strategyFor(m);
+      final n = barrierFor(m, type);
+      observations.insert(0, Observation(symbol, type, n, m.tickSequence, now));
+      recordsDirty = true;
+      signalStrategy[symbol] = type;
+      signalBarrier[symbol] = n;
+      nextCycle[symbol] = now.add(cycleLength);
+      changed = true;
+    }
+    if (observations.length > 1000) observations.removeRange(1000, observations.length);
+    if (changed && mounted) setState(() {});
+  }
+  void stopAutomaticCycles() {
+    setState(() { automaticObservations = false; status = 'Automatic observations stopped • no broker orders'; });
+  }
+
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     broker.onTick = handleTick;
+    unawaited(restoreRecords());
     broker.onDisconnect = (message) {
       if (!mounted) return;
-      setState(() { status = message; realArmed = false; unresolvedOrder = activeContract != null || orderBusy; });
+      setState(() { status = message; realArmed = false; automaticObservations = false; for (final o in observations.where((o) => o.pending)) { o.status = 'CANCELLED • DISCONNECTED'; } unresolvedOrder = activeContract != null || orderBusy; });
+      if (reconnectEnabled && !_manualDisconnect && foreground) _scheduleReconnect();
     };
+    persistenceClock = Timer.periodic(const Duration(seconds: 5), (t) {
+      if (!mounted) { t.cancel(); return; }
+      if (recordsDirty) unawaited(saveRecords());
+    });
     clock = Timer.periodic(const Duration(milliseconds: 250), (_) {
-      if (mounted && foreground) setState(() {});
+      if (mounted && foreground) { runAutomaticCycles(); setState(() {}); }
     });
   }
+  void _scheduleReconnect() {
+    if (!mounted || !foreground || !reconnectEnabled || _manualDisconnect ||
+        broker.connected || connecting || reconnectTimer != null) return;
+    // Back off after failures rather than repeatedly hammering Deriv.
+    final seconds = min(60, 2 * (1 << min(reconnectAttempts, 5)));
+    reconnectTimer = Timer(Duration(seconds: seconds), () {
+      reconnectTimer = null;
+      if (mounted && foreground && reconnectEnabled && !_manualDisconnect && !broker.connected) {
+        unawaited(connect(retrying: true));
+      }
+    });
+    message('Connection lost • retrying in ${seconds}s');
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     foreground = state == AppLifecycleState.resumed;
-    if (!foreground && mounted) setState(() { realArmed = false; status = 'Paused in background • no new orders'; });
-    if (foreground && broker.connected && mounted) setState(() => status = '${mode.toUpperCase()} connected');
+    if (!foreground) {
+      reconnectTimer?.cancel();
+      reconnectTimer = null;
+      _resumePending = reconnectEnabled;
+      if (mounted) setState(() {
+        realArmed = false;
+        automaticObservations = false;
+        for (final o in observations.where((o) => o.pending)) {
+          o.status = 'CANCELLED • BACKGROUND';
+        }
+        status = 'Paused in background • no new orders';
+      });
+    } else if (mounted) {
+      if (broker.connected) {
+        setState(() => status = '${mode.toUpperCase()} connected');
+      } else if (_resumePending && reconnectEnabled && !_manualDisconnect) {
+        _resumePending = false;
+        _scheduleReconnect();
+      }
+    }
   }
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     clock?.cancel();
+    persistenceClock?.cancel();
+    unawaited(saveRecords());
+    reconnectTimer?.cancel();
     unawaited(broker.close());
     appId.dispose();
     pat.dispose();
@@ -280,17 +521,49 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
     final formatted = number.toStringAsFixed(places);
     return int.tryParse(formatted.substring(formatted.length - 1));
   }
-  Future<void> connect() async {
+  Future<void> connect({bool retrying = false}) async {
     if (connecting || broker.connected) return;
-    if (appId.text.trim().isEmpty || pat.text.trim().isEmpty) { message('Enter App ID and a PAT authorized for the selected account'); return; }
+    if (appId.text.trim().isEmpty || pat.text.trim().isEmpty) {
+      message('Enter App ID and PAT to log in');
+      return;
+    }
+    if (!retrying) {
+      _manualDisconnect = false;
+      reconnectEnabled = true;
+      reconnectAttempts = 0;
+    }
+    reconnectTimer?.cancel();
+    reconnectTimer = null;
     setState(() { connecting = true; status = 'Connecting to ${mode.toUpperCase()}…'; });
     try {
       await broker.connect(appId.text.trim(), pat.text.trim(), mode: mode);
       if (!mounted) return;
+      reconnectAttempts = 0;
       message('${mode.toUpperCase()} connected • ${broker.account}');
       await loadMarkets();
-    } catch (e) { message('Connection failed: $e'); }
-    finally { if (mounted) setState(() => connecting = false); }
+      // Never clear an unresolved order until its broker settlement is checked.
+      if (activeContract != null) {
+        final matches = trades.where((t) => t.id == activeContract).toList();
+        if (matches.isNotEmpty) unawaited(monitor(matches.first));
+      }
+      // Reconnection never re-arms real trading or automatically places orders.
+      // An interrupted purchase remains unresolved until independently checked.
+      if (mounted && activeContract != null) {
+        setState(() { unresolvedOrder = true; status = 'Reconnected • verify open contract $activeContract'; });
+      }
+    } catch (e) {
+      if (mounted) {
+        reconnectAttempts++;
+        message('Connection failed: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => connecting = false);
+        if (!broker.connected && reconnectEnabled && foreground && !_manualDisconnect) {
+          _scheduleReconnect();
+        }
+      }
+    }
   }
   Future<void> loadMarkets() async {
     if (!broker.connected || loading) return;
@@ -334,9 +607,109 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
         } catch (e) { message('$symbol unavailable: $e'); }
       }
       if (broker.connected) message('Live radar ready • ${broker.subscriptions.length}/5 markets');
+      if (broker.connected) unawaited(loadClosedCandles());
     } catch (e) { message('Market load failed: $e'); }
     finally { if (mounted) setState(() => loading = false); }
   }
+  Future<void> loadClosedCandles() async {
+    for (final symbol in symbols) {
+      if (!broker.connected || !mounted) break;
+      try {
+        final response = await broker.request({
+          'ticks_history': symbol, 'end': 'latest', 'style': 'candles',
+          'granularity': 60, 'count': 900,
+        });
+        final raw = response['candles'];
+        if (raw is! List) throw StateError('No candle data');
+        final now = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+        final bars = raw.map(PriceBar.fromApi).whereType<PriceBar>()
+          .where((b)=>b.epoch+60<=now).toList()
+          ..sort((a,b)=>a.epoch.compareTo(b.epoch));
+        final one=CandleReading.calculate(bars);
+        final five=CandleReading.calculate(aggregateClosed(bars,5));
+        final fifteen=CandleReading.calculate(aggregateClosed(bars,15));
+        if (one==null || five==null || fifteen==null) {
+          throw StateError('Insufficient complete 1m/5m/15m bars');
+        }
+        if (mounted) setState(() {
+          candleReadings[symbol]=MultiFrameReading(one,five,fifteen,DateTime.now());
+          candleErrors.remove(symbol);
+        });
+      } catch (e) {
+        if (mounted) setState(() => candleErrors[symbol]='$e');
+      }
+    }
+  }
+
+  // Stores outcomes locally; PAT and App ID are deliberately never persisted.
+  Future<void> saveRecords() async {
+    if (restoring) return;
+    try {
+      final prefs=await SharedPreferences.getInstance();
+      final data={
+        'version':1,
+        'observations': observations.take(1000).map((o)=>{
+          'market':o.market,'strategy':o.strategy,'barrier':o.barrier,
+          'started':o.started.toIso8601String(),'deadline':o.deadline.toIso8601String(),
+          'actualDigit':o.actualDigit,'actualEpoch':o.actualEpoch,
+          'won':o.won,'status':o.status,
+        }).toList(),
+        'trades': trades.take(500).map((t)=>{
+          'market':t.market,'direction':t.direction,'id':t.id,
+          'stake':t.stake,'profit':t.profit,'status':t.status,
+        }).toList(),
+        'activeContract':activeContract,'unresolvedOrder':unresolvedOrder,
+        'tradeCount':tradeCount,'consecutiveLosses':consecutiveLosses,
+        'pnl':pnl,'lastOrder':lastOrder?.toIso8601String(),
+      };
+      await prefs.setString('v10_history_v1',jsonEncode(data));
+      recordsDirty=false;
+    } catch (e) { if (mounted) message('History save failed: $e'); }
+  }
+
+  Future<void> restoreRecords() async {
+    try {
+      final prefs=await SharedPreferences.getInstance();
+      final raw=prefs.getString('v10_history_v1');
+      if (raw==null) return;
+      final root=jsonDecode(raw);
+      if (root is! Map || root['version']!=1) return;
+      final obs=root['observations'];
+      if (obs is List) for (final item in obs) {
+        if (item is! Map) continue;
+        try {
+          final start=DateTime.parse('${item['started']}');
+          final o=Observation('${item['market']}','${item['strategy']}',
+            (item['barrier'] as num).toInt(),0,start);
+          o.actualDigit=(item['actualDigit'] as num?)?.toInt();
+          o.actualEpoch=(item['actualEpoch'] as num?)?.toInt();
+          o.won=item['won'] as bool?;
+          o.status='${item['status']}';
+          if (o.pending) o.status='INTERRUPTED • NOT SCORED';
+          observations.add(o);
+        } catch (_) {}
+      }
+      final savedTrades=root['trades'];
+      if (savedTrades is List) for (final item in savedTrades) {
+        if (item is! Map) continue;
+        try {
+          final t=TradeRecord('${item['market']}','${item['direction']}',
+            '${item['id']}',(item['stake'] as num).toDouble());
+          t.profit=(item['profit'] as num?)?.toDouble() ?? 0;
+          t.status='${item['status']}';
+          trades.add(t);
+        } catch (_) {}
+      }
+      activeContract=root['activeContract'] as String?;
+      unresolvedOrder=root['unresolvedOrder']==true || activeContract!=null;
+      tradeCount=(root['tradeCount'] as num?)?.toInt() ?? 0;
+      consecutiveLosses=(root['consecutiveLosses'] as num?)?.toInt() ?? 0;
+      pnl=(root['pnl'] as num?)?.toDouble() ?? 0;
+      lastOrder=root['lastOrder'] == null ? null : DateTime.tryParse('${root['lastOrder']}');
+    } catch (e) { if (mounted) message('History restore failed: $e'); }
+    finally { restoring=false; if (mounted) setState(() {}); }
+  }
+
   void handleTick(Map<String, dynamic> response) {
     if (!mounted || !broker.connected) return;
     final tick = response['tick'];
@@ -364,6 +737,8 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
           o.actualEpoch = epoch;
           o.won = evaluate(o.strategy, digit, o.barrier);
           o.status = o.won! ? 'CORRECT' : 'INCORRECT';
+          recordsDirty = true;
+          nextCycle[symbol] = DateTime.now().add(const Duration(seconds: 1));
         }
       }
     });
@@ -390,6 +765,7 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
     final n = strategy == 'Matches' || strategy == 'Differs' ? (m.frequentDigit ?? barrier) : barrier;
     setState(() {
       observations.insert(0, Observation(selected, strategy, n, m.tickSequence, DateTime.now()));
+      recordsDirty = true;
       if (observations.length > 500) observations.removeLast();
       status = 'Observation locked • no broker order placed';
     });
@@ -400,10 +776,10 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
   int correctFor(String symbol) => observations.where((o) => o.market == symbol && o.won == true).length;
   String rate(int wins, int total) => total == 0 ? 'Not measured' : '${(100 * wins / total).toStringAsFixed(1)}% ($wins/$total)';
 
-  bool get canTrade => broker.connected && foreground && !emergencyStopped && !orderBusy && !unresolvedOrder && activeContract == null &&
+  bool get canTrade => !restoring && broker.connected && foreground && !emergencyStopped && !orderBusy && !unresolvedOrder && activeContract == null &&
       tradeCount < 6 && consecutiveLosses < 2 && pnl > -1.00 &&
       stake.isFinite && stake >= 0.35 && stake <= (mode == 'real' ? 1.00 : 5.00) &&
-      (mode == 'demo' || realArmed) &&
+      mode == 'demo' &&
       (lastOrder == null || DateTime.now().difference(lastOrder!).inSeconds >= 300);
   Future<void> reviewTrade() async {
     final m = states[selected]!;
@@ -440,6 +816,7 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
       if (!mounted || !broker.connected || !foreground) throw StateError('Connection or foreground lost');
       buyAttempted = true;
       unresolvedOrder = true; // Never blindly retry a timed-out buy.
+      recordsDirty = true;
       final bought = await broker.request({'buy': proposalId, 'price': ask});
       final details = bought['buy'];
       if (details is! Map || details['contract_id'] == null) {
@@ -449,6 +826,7 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
       final record = TradeRecord(symbol, side, id, ask);
       setState(() {
         trades.insert(0, record);
+        recordsDirty = true;
         activeContract = id;
         unresolvedOrder = false;
         tradeCount++;
@@ -457,7 +835,7 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
       });
       unawaited(monitor(record));
     } catch (e) {
-      if (buyAttempted) { unresolvedOrder = true; message('ORDER UNCERTAIN • check Deriv portfolio: $e'); }
+      if (buyAttempted) { unresolvedOrder = true; recordsDirty = true; message('ORDER UNCERTAIN • check Deriv portfolio: $e'); }
       else { message('Proposal rejected: $e'); }
     } finally { if (mounted) setState(() => orderBusy = false); }
   }
@@ -474,6 +852,7 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
           if (!mounted) return;
           setState(() {
             record.profit = profit;
+            recordsDirty = true;
             record.status = profit > 0 ? 'WIN' : profit < 0 ? 'LOSS' : 'DRAW';
             pnl += profit;
             consecutiveLosses = profit < 0 ? consecutiveLosses + 1 : profit > 0 ? 0 : consecutiveLosses;
@@ -486,10 +865,14 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
       await Future<void>.delayed(const Duration(seconds: 5));
     }
     if (mounted && activeContract == record.id) {
-      setState(() { unresolvedOrder = true; status = 'Contract status unresolved • verify ${mode.toUpperCase()} portfolio'; });
+      setState(() { unresolvedOrder = true; recordsDirty = true; status = 'Contract status unresolved • verify ${mode.toUpperCase()} portfolio'; });
     }
   }
   Future<void> disconnect() async {
+    _manualDisconnect = true;
+    reconnectEnabled = false;
+    reconnectTimer?.cancel();
+    reconnectTimer = null;
     await broker.close();
     if (mounted) setState(() {
       unresolvedOrder = unresolvedOrder || activeContract != null || orderBusy;
@@ -516,18 +899,34 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
 
   Widget radar() => Column(children: [
     panel('LIVE MULTI-MARKET RADAR', Column(children: [
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('Automatic 10-second observations'),
+        subtitle: const Text('All five markets • no automatic purchases'),
+        value: automaticObservations,
+        onChanged: broker.connected && foreground ? (v) => setState(() {
+          automaticObservations = v;
+          if (v) { nextCycle.clear(); status = 'Automatic observations active • demo observations only'; }
+        }) : null,
+      ),
       const Text('All five markets • live feed status • trend is not trade accuracy', style: TextStyle(fontSize: 12, color: Colors.white70)),
       const SizedBox(height: 8),
       ...symbols.map((s) {
         final m = states[s]!;
         final count = evaluatedFor(s);
+        final pending = activeFor(s);
+        final recent = m.digits.toList().reversed.take(9).toList().reversed.join('  ');
+        final previous = observations.where((o) => o.market == s && o.won != null).toList();
+        final latest = previous.isEmpty ? null : previous.first;
         return ListTile(contentPadding: EdgeInsets.zero,
           onTap: () => setState(() { selected = s; tab = 1; }),
           leading: CircleAvatar(backgroundColor: m.fresh ? Colors.green.withValues(alpha: .2) : Colors.white10,
             child: Icon(m.fresh ? Icons.sensors : Icons.hourglass_empty, color: m.fresh ? Colors.greenAccent : Colors.white54)),
           title: Text('Volatility ${s.substring(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
           subtitle: Text('${m.trend} • ${m.total} ticks • ${m.fresh ? 'LIVE' : 'WAIT'}\n'
-              'Observed accuracy: ${rate(correctFor(s), count)}'),
+              'Signal: ${pending == null ? (latest == null ? 'ANALYZING' : '${latest.strategy.toUpperCase()} ${latest.barrier} • ${latest.status}') : '${pending.strategy.toUpperCase()} ${pending.barrier} • ${pending.remaining}s'}\n'
+              'Recent digits: $recent\n'
+              'Observed accuracy: ${rate(correctFor(s), count)} • Tick indicators: ${m.indicators?.direction ?? 'COLLECTING'} (${m.indicators?.agreement ?? 0}% agreement)'),
           isThreeLine: true,
           trailing: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
             Text(m.lastDigit?.toString() ?? '–', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: accent)),
@@ -539,6 +938,7 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
     panel('ACTUAL RESULTS', Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text(rate(correct, evaluated), style: const TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
       Text('$evaluated evaluated observations • $correct correct'),
+      Text('80% target: ${evaluated >= 200 ? (correct / evaluated * 100 >= 80 ? 'REACHED in sample' : 'NOT REACHED') : 'NOT VERIFIED • ${max(0, 200 - evaluated)} more observations to 200'}'),
       const Text('10-second observations are NOT broker trades or a calibrated probability.', style: TextStyle(color: Colors.white70, fontSize: 12)),
       const SizedBox(height: 8),
       Text('Broker-settled demo trades: ${trades.where((t) => t.status == 'WIN' || t.status == 'LOSS').length}'),
@@ -560,6 +960,27 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
         Wrap(spacing: 7, runSpacing: 7, children: [pill(m.fresh ? 'LIVE' : 'WAIT', color: m.fresh ? Colors.greenAccent : Colors.orangeAccent),
           pill('TREND ${m.trend}'), pill('${m.total} TICKS'), pill('PRECISION ${m.precision ?? '–'}')]),
         const SizedBox(height: 12),
+        if (m.indicators case final i?) ...[
+          Text('TICK INDICATORS • ${i.direction} • ${i.agreement}% indicator agreement',
+            style: const TextStyle(fontWeight: FontWeight.bold, color: accent)),
+          Text('EMA20 ${i.ema20.toStringAsFixed(m.precision ?? 3)}  |  EMA50 ${i.ema50.toStringAsFixed(m.precision ?? 3)}'),
+          Text('RSI(14) ${i.rsi14.toStringAsFixed(1)}  |  MACD ${i.macd.toStringAsExponential(2)}'),
+          Text('MACD signal ${i.macdSignal.toStringAsExponential(2)}  |  Mean tick move ${i.atr14.toStringAsExponential(2)}'),
+          const Text('Calculated from tick prices, NOT 1m/5m/15m closed candles. Tick movement is not candle ATR or a digit-win probability.',
+            style: TextStyle(fontSize: 11, color: Colors.white70)),
+        ] else const Text('Collecting 60+ ticks for indicator analysis…'),
+        const SizedBox(height: 12),
+        if (candleReadings[selected] case final f?) ...[
+          const SizedBox(height: 10),
+          Text('CLOSED CANDLES • 1m ${f.one.direction} / 5m ${f.five.direction} / 15m ${f.fifteen.direction}',
+            style: const TextStyle(fontWeight: FontWeight.bold, color: accent)),
+          Text('Multi-timeframe agreement: ${f.direction} • Updated ${f.updated.toLocal()}'),
+          Text('1m RSI ${f.one.rsi.toStringAsFixed(1)} • true-range ATR ${f.one.atr.toStringAsExponential(2)}'),
+          const Text('Closed-candle trend agreement is not a next-digit win probability.',
+            style: TextStyle(fontSize: 11, color: Colors.white70)),
+        ] else Text('Closed-candle analysis: ${candleErrors[selected] ?? 'Loading 1m/5m/15m bars…'}'),
+        OutlinedButton(onPressed: broker.connected ? loadClosedCandles : null,
+          child: const Text('REFRESH CLOSED-CANDLE ANALYSIS')),
         Text('Last quote: ${m.lastPrice == null ? '–' : m.lastPrice!.toStringAsFixed(m.precision ?? 3)}'),
         Text('Last digit: ${m.lastDigit ?? '–'}', style: const TextStyle(fontSize: 34, fontWeight: FontWeight.bold, color: accent)),
         const SizedBox(height: 8),
@@ -624,11 +1045,12 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
     panel('ACCOUNT CONNECTION', Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       SegmentedButton<String>(segments: const [ButtonSegment(value: 'demo', label: Text('DEMO')), ButtonSegment(value: 'real', label: Text('REAL MONEY'))],
         selected: {mode}, onSelectionChanged: broker.connected || orderBusy || unresolvedOrder || activeContract != null ? null : (v) => setState(() {
-          mode = v.first; realArmed = false; tradeCount = 0; consecutiveLosses = 0; pnl = 0; lastOrder = null;
-          trades.clear(); stake = 0.35; status = '${mode.toUpperCase()} selected • not connected';
+          reconnectEnabled = false; reconnectTimer?.cancel(); reconnectTimer = null; mode = v.first; realArmed = false; tradeCount = 0; consecutiveLosses = 0; pnl = 0; lastOrder = null;
+          // Keep historical records across account-mode changes.
+          stake = 0.35; status = '${mode.toUpperCase()} selected • not connected';
         })),
       if (mode == 'real') const Padding(padding: EdgeInsets.symmetric(vertical: 10), child: Text(
-        'REAL MONEY MODE • Actual funds can be lost. Manual orders only. Max USD 1 per order; session risk limits apply. No verified 80% accuracy.',
+        'REAL MONEY MODE • Orders are disabled in this unverified V10 build. Use DEMO for testing.',
         style: TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold))),
       TextField(controller: appId, decoration: const InputDecoration(labelText: 'Deriv App ID')),
       TextField(controller: pat, obscureText: true, enableSuggestions: false, autocorrect: false,
@@ -639,20 +1061,7 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
       OutlinedButton(onPressed: broker.connected ? disconnect : null, child: const Text('DISCONNECT')),
       OutlinedButton(onPressed: broker.connected && !loading ? loadMarkets : null, child: const Text('REFRESH ALL MARKETS')),
     ])),
-    if (mode == 'real') panel('REAL-MONEY ARMING', Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text('Real-money orders are blocked until you deliberately arm them. Arming does not place an order. Each order still requires confirmation.'),
-      SwitchListTile(title: const Text('Enable manual real-money orders'), value: realArmed,
-        onChanged: broker.connected && !orderBusy && !unresolvedOrder && activeContract == null ? (v) async {
-          if (!v) { setState(() => realArmed = false); return; }
-          final approved = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
-            title: const Text('Arm real-money trading?'),
-            content: const Text('Real funds can be lost. Your V9 accuracy is not validated. Manual orders only, USD 1 maximum stake, USD 1 session loss limit, one contract at a time.'),
-            actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
-              FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('I UNDERSTAND • ARM'))],
-          ));
-          if (mounted && approved == true && broker.connected && mode == 'real') setState(() => realArmed = true);
-        } : null),
-    ])),
+    if (mode == 'real') panel('REAL-MONEY ORDERS', const Text('Disabled pending compilation, reconciliation tests and independent validation.')),
     panel('RISK LIMITS', Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text('Stake: USD ${stake.toStringAsFixed(2)}'),
       Slider(value: stake, min: 0.35, max: mode == 'real' ? 1.00 : 5.00, divisions: mode == 'real' ? 13 : 93,
@@ -670,13 +1079,13 @@ class _ExpertHomeState extends State<ExpertHome> with WidgetsBindingObserver {
     panel('ACCURACY & LIMITATIONS', const Text('No 80% win-rate claim is made. '
       'Digit predictions are observations, not orders. Price trend does not predict random last digits. '
       'Only broker-settled contracts count as trading results. '
-      'Records are session-only and reset when the app restarts. '
+      'Observations and trade outcomes are saved locally; credentials are not. '
       'Automatic trading is disabled. Real-money mode is manually armed and unverified; do not treat observations as proof of profitability.')),
   ]);
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(backgroundColor: surface, title: const Text('V9 • Expert Trader'),
+    appBar: AppBar(backgroundColor: surface, title: const Text('V10 • Expert Trader'),
       actions: [Padding(padding: const EdgeInsets.only(right: 12), child: Center(child:
         pill(broker.connected ? '${mode.toUpperCase()} ONLINE' : 'OFFLINE', color: broker.connected ? Colors.greenAccent : Colors.orangeAccent)))]),
     body: Column(children: [
