@@ -26,13 +26,122 @@ class Observation { final String symbol,strategy; final int predicted,observed,e
 class Dashboard extends StatefulWidget { const Dashboard({super.key}); @override State<Dashboard> createState()=>_DashboardState(); }
 class _DashboardState extends State<Dashboard> {
  final markets=[Market('R_10','Volatility 10',3),Market('R_25','Volatility 25',3),Market('R_50','Volatility 50',4),Market('R_75','Volatility 75',4),Market('R_100','Volatility 100',2),Market('1HZ10V','Volatility 10 (1s)',2),Market('1HZ25V','Volatility 25 (1s)',2),Market('1HZ50V','Volatility 50 (1s)',2),Market('1HZ75V','Volatility 75 (1s)',2),Market('1HZ100V','Volatility 100 (1s)',2)];
- final observations=<Observation>[]; final alerts=<String>[]; WebSocketChannel? channel; StreamSubscription? subscription; Timer? clock,reconnect; int tab=0, strategy=0, remaining=10; bool grid=false, autoScan=true, sound=true, demo=true, connecting=false, autoReconnect=true; String status='CONNECTING', selected='R_25', note='', accountLabel='Public market data'; int reconnectAttempts=0; DateTime? lastMessage;
- @override void initState(){super.initState(); _load(); _connect();clock=Timer.periodic(const Duration(seconds:1),(_){if(!mounted)return;setState((){remaining=remaining<=1?10:remaining-1; for(final m in markets){if(m.lastSeen!=null && DateTime.now().difference(m.lastSeen!).inSeconds>12)m.live=false;}});if(autoScan && remaining==10)_observe(); if(lastMessage!=null&&DateTime.now().difference(lastMessage!).inSeconds>25)_reconnect();});}
+ final observations=<Observation>[]; final alerts=<String>[]; WebSocketChannel? channel; StreamSubscription? subscription; Timer? clock,reconnect; int tab=0, strategy=0, remaining=10; bool grid=false, autoScan=true, sound=true, demo=true, connecting=false, autoReconnect=true; int connectionGeneration=0; final unsupportedSymbols=<String>{}; String status='CONNECTING', selected='R_25', note='', accountLabel='Public market data'; int reconnectAttempts=0; DateTime? lastMessage;
+ @override void initState(){super.initState(); _load(); _connect();clock=Timer.periodic(const Duration(seconds:1),(_){if(!mounted)return;setState((){remaining=remaining<=1?10:remaining-1; for(final m in markets){if(m.lastSeen!=null && DateTime.now().difference(m.lastSeen!).inSeconds>12)m.live=false;}});if(autoScan && remaining==10)_observe(); if(status=='PUBLIC LIVE' && lastMessage!=null && DateTime.now().difference(lastMessage!).inSeconds>35)_reconnect();});}
  Future<void> _load()async{final p=await SharedPreferences.getInstance();if(!mounted)return;setState((){autoScan=p.getBool('autoScan')??true;autoReconnect=p.getBool('autoReconnect')??true; sound=p.getBool('sound')??true; final raw=p.getStringList('observations')??[];for(final x in raw){try{observations.add(Observation.fromJson(jsonDecode(x)));}catch(_){}}});}
  Future<void> _save()async{final p=await SharedPreferences.getInstance();await p.setBool('autoScan',autoScan);await p.setBool('autoReconnect',autoReconnect);await p.setBool('sound',sound);await p.setStringList('observations',observations.take(300).map((x)=>jsonEncode(x.toJson())).toList());}
- void _connect(){if(connecting)return;connecting=true;setState((){status='CONNECTING';});try{final ws=WebSocketChannel.connect(Uri.parse('wss://ws.derivws.com/websockets/v3?app_id=1089'));channel=ws;subscription=ws.stream.listen(_message,onError:(_)=>_reconnect(),onDone:_reconnect);ws.sink.add(jsonEncode({'ping':1}));for(final m in markets){ws.sink.add(jsonEncode({'ticks':m.symbol,'subscribe':1}));}connecting=false;reconnectAttempts=0;setState((){status='PUBLIC LIVE';});}catch(_){connecting=false;_reconnect();}}
- void _reconnect(){if(!autoReconnect||!mounted||reconnect?.isActive==true)return;subscription?.cancel();try{channel?.sink.close();}catch(_){} connecting=false;setState((){status='RECONNECTING';for(final m in markets){m.live=false;}});reconnect=Timer(Duration(seconds:min(30,2<<min(reconnectAttempts++,4))),_connect);}
- void _message(dynamic raw){try{final j=jsonDecode(raw as String);if(j['msg_type']=='tick'){final t=j['tick'];final m=markets.where((x)=>x.symbol==t['symbol']).firstOrNull;if(m==null)return;final q=(t['quote'] as num).toDouble();final epoch=(t['epoch'] as num).toInt();final p=(t['pip_size'] as num?)?.toInt()??m.precision;final str=q.toStringAsFixed(p);final digit=int.parse(str[str.length-1]);if(m.ticks.isNotEmpty&&m.ticks.last.epoch==epoch&&m.ticks.last.quote==q)return;m.ticks.add(TickPoint(q,epoch,digit));if(m.ticks.length>200)m.ticks.removeAt(0);m.lastSeen=DateTime.now();m.live=true;lastMessage=DateTime.now();_trend(m);_settle(m);if(m.prediction==null&&m.ticks.length>=30)_predict(m);setState((){status='PUBLIC LIVE';});} }catch(_){}}
+ Future<void> _connect() async {
+   if (!mounted || connecting) return;
+   reconnect?.cancel();
+   final generation = ++connectionGeneration;
+   connecting = true;
+   setState(() => status = 'CONNECTING');
+   try {
+     await subscription?.cancel();
+     try { await channel?.sink.close(); } catch (_) {}
+     final ws = WebSocketChannel.connect(
+       Uri.parse('wss://ws.derivws.com/websockets/v3?app_id=1089'),
+     );
+     channel = ws;
+     // Do not report LIVE until the socket handshake has completed.
+     await ws.ready.timeout(const Duration(seconds: 15));
+     if (!mounted || generation != connectionGeneration) {
+       await ws.sink.close();
+       return;
+     }
+     subscription = ws.stream.listen(
+       (raw) => _message(raw),
+       onError: (Object error) {
+         if (generation == connectionGeneration) _reconnect();
+       },
+       onDone: () {
+         if (generation == connectionGeneration) _reconnect();
+       },
+       cancelOnError: true,
+     );
+     lastMessage = DateTime.now();
+     reconnectAttempts = 0;
+     connecting = false;
+     setState(() => status = 'SUBSCRIBING');
+     for (final m in markets) {
+       if (unsupportedSymbols.contains(m.symbol)) continue;
+       ws.sink.add(jsonEncode({'ticks': m.symbol, 'subscribe': 1}));
+     }
+   } catch (error) {
+     if (generation != connectionGeneration) return;
+     connecting = false;
+     if (mounted) setState(() => status = 'CONNECTION FAILED');
+     _reconnect();
+   }
+ }
+ void _reconnect() {
+   if (!mounted || reconnect?.isActive == true) return;
+   connectionGeneration++;
+   subscription?.cancel();
+   try { channel?.sink.close(); } catch (_) {}
+   channel = null;
+   connecting = false;
+   setState(() {
+     status = 'RECONNECTING';
+     for (final m in markets) { m.live = false; }
+   });
+   if (!autoReconnect) return;
+   final delay = min(30, 2 << min(reconnectAttempts++, 4));
+   reconnect = Timer(Duration(seconds: delay), _connect);
+ }
+ void _message(dynamic raw) {
+   try {
+     final j = jsonDecode(raw as String) as Map<String, dynamic>;
+     lastMessage = DateTime.now();
+     if (j['msg_type'] == 'error' || j['error'] != null) {
+       final error = j['error'];
+       final message = error is Map ? (error['message']?.toString() ?? 'API error') : 'API error';
+       final symbol = (j['echo_req'] is Map) ? j['echo_req']['ticks']?.toString() : null;
+       if (symbol != null && (message.toLowerCase().contains('symbol') || message.toLowerCase().contains('market'))) {
+         unsupportedSymbols.add(symbol);
+       }
+       if (mounted) setState(() {
+         status = 'FEED ERROR';
+         alerts.insert(0, 'Deriv: $message');
+         if (alerts.length > 80) alerts.removeLast();
+       });
+       return;
+     }
+     if (j['msg_type'] != 'tick') return;
+     final t = j['tick'];
+     if (t is! Map) return;
+     Market? m;
+     for (final market in markets) {
+       if (market.symbol == t['symbol']) { m = market; break; }
+     }
+     if (m == null) return;
+     final quote = t['quote'];
+     final epochValue = t['epoch'];
+     if (quote is! num || epochValue is! num) return;
+     final q = quote.toDouble();
+     final epoch = epochValue.toInt();
+     final rawPrecision = t['pip_size'];
+     final precision = rawPrecision is num ? rawPrecision.toInt() : m.precision;
+     if (precision < 0 || precision > 10) return;
+     final digits = q.toStringAsFixed(precision);
+     final digit = int.tryParse(digits.substring(digits.length - 1));
+     if (digit == null) return;
+     if (m.ticks.isNotEmpty && m.ticks.last.epoch == epoch && m.ticks.last.quote == q) return;
+     m.ticks.add(TickPoint(q, epoch, digit));
+     if (m.ticks.length > 200) m.ticks.removeAt(0);
+     m.lastSeen = DateTime.now();
+     m.live = true;
+     _trend(m);
+     _settle(m);
+     if (m.prediction == null && m.ticks.length >= 30) _predict(m);
+     if (mounted) setState(() => status = 'PUBLIC LIVE');
+   } catch (error) {
+     if (mounted) setState(() {
+       alerts.insert(0, 'Market data parsing error: $error');
+       if (alerts.length > 80) alerts.removeLast();
+     });
+   }
+ }
  void _trend(Market m){if(m.ticks.length<50){m.trend='COLLECTING';return;}final xs=m.ticks.map((e)=>e.quote).toList();double ema(int n){var a=xs.first;final k=2/(n+1);for(final x in xs.skip(1)){a=x*k+a*(1-k);}return a;}final a=ema(20),b=ema(50);m.trend=a>b?'UP':a<b?'DOWN':'SIDEWAYS';m.agreement=((a-b).abs()/(xs.last.abs()+0.0001)*10000).clamp(0,100).toDouble();}
  void _predict(Market m){if(m.ticks.length<30)return;final counts=List.filled(10,0);for(final t in m.ticks)counts[t.digit]++;int best=0;for(int i=1;i<10;i++){if(counts[i]>counts[best])best=i;}m.prediction=best;m.predictedEpoch=m.ticks.last.epoch;}
  void _observe(){for(final m in markets){if(m.live&&m.ticks.length>=30){_predict(m);}}if(mounted)setState((){});}
@@ -48,7 +157,7 @@ class _DashboardState extends State<Dashboard> {
  Widget _history()=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Observation History',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),...observations.take(100).map((o)=>_card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('${o.symbol} • ${o.strategy} • ${o.correct?'CORRECT':'INCORRECT'}',style:TextStyle(color:o.correct?green:red,fontWeight:FontWeight.bold)),Text('Predicted ${o.predicted} • Observed ${o.observed} • Epoch ${o.epoch}')])))]);
  Widget _journal(){final wins=observations.where((x)=>x.correct).length;return Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Trading Journal',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),Row(children:[_metric('${observations.length}','TOTAL'),const SizedBox(width:6),_metric('$wins','CORRECT'),const SizedBox(width:6),_metric('${observations.length-wins}','INCORRECT')]),_card(Text('Observed accuracy: ${observations.isEmpty?'Not measured':'${(wins*100/observations.length).toStringAsFixed(1)}%'}\nObservations are not broker trades.')), _card(TextField(maxLines:4,decoration:const InputDecoration(labelText:'Your notes',hintText:'Write a trading observation...'),onChanged:(v)=>note=v)),FilledButton(onPressed:()async{final p=await SharedPreferences.getInstance();await p.setString('journalNote',note);if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Note saved locally')));},child:const Text('SAVE NOTE'))]);}
  Widget _alerts()=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Alerts',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),_card(SwitchListTile(title:const Text('Observation alerts'),subtitle:const Text('Local result notifications in the app'),value:sound,onChanged:(v){setState(()=>sound=v);_save();})),...alerts.take(80).map((a)=>_card(Text(a)))]);
- Widget _settings()=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Settings',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),_card(Column(children:[SwitchListTile(title:const Text('Automatic scanning'),value:autoScan,onChanged:(v){setState(()=>autoScan=v);_save();}),SwitchListTile(title:const Text('Auto reconnect'),value:autoReconnect,onChanged:(v){setState(()=>autoReconnect=v);_save();}),SwitchListTile(title:const Text('In-app alerts'),value:sound,onChanged:(v){setState(()=>sound=v);_save();}),const ListTile(title:Text('Market feed'),subtitle:Text('Deriv public WebSocket • app_id 1089')),const ListTile(title:Text('Trading mode'),subtitle:Text('Read-only • No broker orders'))])),FilledButton(onPressed:_reconnect,child:const Text('RECONNECT MARKET FEED'))]);
+ Widget _settings()=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Settings',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),_card(Column(children:[SwitchListTile(title:const Text('Automatic scanning'),value:autoScan,onChanged:(v){setState(()=>autoScan=v);_save();}),SwitchListTile(title:const Text('Auto reconnect'),value:autoReconnect,onChanged:(v){setState(()=>autoReconnect=v);_save();}),SwitchListTile(title:const Text('In-app alerts'),value:sound,onChanged:(v){setState(()=>sound=v);_save();}),const ListTile(title:Text('Market feed'),subtitle:Text('Deriv public WebSocket • app_id 1089')),const ListTile(title:Text('Trading mode'),subtitle:Text('Read-only • No broker orders'))])),FilledButton(onPressed:(){autoReconnect=true;reconnect?.cancel();_reconnect();reconnect?.cancel();_connect();},child:const Text('RECONNECT MARKET FEED'))]);
  @override
  Widget build(BuildContext context) {
    final pages = <Widget Function()>[
