@@ -1,19 +1,15 @@
-name: deriv_multi_volatility
-version: 0.1.0+1
-description: Foreground-only Deriv five-market trading prototype
+name: v11_expert_trader
+description: V11 Expert Trader prototype with Deriv public market feed
 publish_to: none
-
+version: 11.0.0+1
 environment:
   sdk: '>=3.3.0 <4.0.0'
-
 dependencies:
   flutter:
     sdk: flutter
   web_socket_channel: ^3.0.1
-  flutter_secure_storage: ^9.2.4
-  http: ^1.3.0
-
-  shared_preferences: ^2.5.3
-
+  shared_preferences: ^2.3.2
+  flutter_secure_storage: ^9.2.2
+  fl_chart: ^0.69.0
 flutter:
   uses-material-design: true
