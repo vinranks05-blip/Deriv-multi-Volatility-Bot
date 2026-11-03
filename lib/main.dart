@@ -1,234 +1,1419 @@
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const V11App());
-const bg = Color(0xff030d26), panel = Color(0xff10234b), cyan = Color(0xff00d8ff), blue = Color(0xff1385ff), green = Color(0xff00e5a0), red = Color(0xffff5275);
+
+const bg = Color(0xff030d26);
+const panel = Color(0xff10234b);
+const cyan = Color(0xff00d8ff);
+const blue = Color(0xff1385ff);
+const green = Color(0xff00e5a0);
+const red = Color(0xffff5275);
+
 class V11App extends StatelessWidget {
   const V11App({super.key});
-  @override Widget build(BuildContext context) => MaterialApp(debugShowCheckedModeBanner:false, theme: ThemeData.dark(useMaterial3:true).copyWith(scaffoldBackgroundColor:bg, colorScheme:ColorScheme.fromSeed(seedColor:cyan,brightness:Brightness.dark)), home:const Dashboard());
-}
-class TickPoint { final double quote; final int epoch; final int digit; TickPoint(this.quote,this.epoch,this.digit); }
-class Market {
-  final String symbol,name; final int precision; final List<TickPoint> ticks=[];
-  bool live=false; int? prediction, predictedEpoch; String trend='WAIT'; double agreement=0; DateTime? lastSeen;
-  Market(this.symbol,this.name,this.precision);
-  int? get lastDigit => ticks.isEmpty?null:ticks.last.digit;
-  double get frequency { if(prediction==null||ticks.isEmpty)return 0; return ticks.where((e)=>e.digit==prediction).length/ticks.length*100; }
-}
-class Observation { final String symbol,strategy; final int predicted,observed,epoch; final bool correct; Observation(this.symbol,this.strategy,this.predicted,this.observed,this.epoch,this.correct);
- Map<String,dynamic> toJson()=>{'symbol':symbol,'strategy':strategy,'predicted':predicted,'observed':observed,'epoch':epoch,'correct':correct};
- factory Observation.fromJson(Map<String,dynamic> j)=>Observation(j['symbol'],j['strategy'],j['predicted'],j['observed'],j['epoch'],j['correct']);
-}
-class Dashboard extends StatefulWidget { const Dashboard({super.key}); @override State<Dashboard> createState()=>_DashboardState(); }
-class _DashboardState extends State<Dashboard> {
- final markets=[Market('R_10','Volatility 10',3),Market('R_25','Volatility 25',3),Market('R_50','Volatility 50',4),Market('R_75','Volatility 75',4),Market('R_100','Volatility 100',2),Market('1HZ10V','Volatility 10 (1s)',2),Market('1HZ25V','Volatility 25 (1s)',2),Market('1HZ50V','Volatility 50 (1s)',2),Market('1HZ75V','Volatility 75 (1s)',2),Market('1HZ100V','Volatility 100 (1s)',2)];
- final observations=<Observation>[]; final alerts=<String>[]; WebSocketChannel? channel; StreamSubscription? subscription; Timer? clock,reconnect; int tab=0, strategy=0, remaining=10; bool grid=false, autoScan=true, sound=true, demo=true, connecting=false, autoReconnect=true; int connectionGeneration=0; final unsupportedSymbols=<String>{}; String status='CONNECTING', selected='R_25', note='', accountLabel='Public market data'; int reconnectAttempts=0; DateTime? lastMessage;
- @override void initState(){super.initState(); _load(); _connect();clock=Timer.periodic(const Duration(seconds:1),(_){if(!mounted)return;setState((){remaining=remaining<=1?10:remaining-1; for(final m in markets){if(m.lastSeen!=null && DateTime.now().difference(m.lastSeen!).inSeconds>12)m.live=false;}});if(autoScan && remaining==10)_observe(); if(status=='PUBLIC LIVE' && lastMessage!=null && DateTime.now().difference(lastMessage!).inSeconds>35)_reconnect();});}
- Future<void> _load()async{final p=await SharedPreferences.getInstance();if(!mounted)return;setState((){autoScan=p.getBool('autoScan')??true;autoReconnect=p.getBool('autoReconnect')??true; sound=p.getBool('sound')??true; final raw=p.getStringList('observations')??[];for(final x in raw){try{observations.add(Observation.fromJson(jsonDecode(x)));}catch(_){}}});}
- Future<void> _save()async{final p=await SharedPreferences.getInstance();await p.setBool('autoScan',autoScan);await p.setBool('autoReconnect',autoReconnect);await p.setBool('sound',sound);await p.setStringList('observations',observations.take(300).map((x)=>jsonEncode(x.toJson())).toList());}
- Future<void> _connect() async {
-   if (!mounted || connecting) return;
-   reconnect?.cancel();
-   final generation = ++connectionGeneration;
-   connecting = true;
-   setState(() => status = 'CONNECTING');
-   try {
-     await subscription?.cancel();
-     try { await channel?.sink.close(); } catch (_) {}
-     final ws = WebSocketChannel.connect(
-       Uri.parse('wss://ws.derivws.com/websockets/v3?app_id=1089'),
-     );
-     channel = ws;
-     // Do not report LIVE until the socket handshake has completed.
-     await ws.ready.timeout(const Duration(seconds: 15));
-     if (!mounted || generation != connectionGeneration) {
-       await ws.sink.close();
-       return;
-     }
-     subscription = ws.stream.listen(
-       (raw) => _message(raw),
-       onError: (Object error) {
-         if (generation == connectionGeneration) _reconnect();
-       },
-       onDone: () {
-         if (generation == connectionGeneration) _reconnect();
-       },
-       cancelOnError: true,
-     );
-     lastMessage = DateTime.now();
-     reconnectAttempts = 0;
-     connecting = false;
-     setState(() => status = 'SUBSCRIBING');
-     for (final m in markets) {
-       if (unsupportedSymbols.contains(m.symbol)) continue;
-       ws.sink.add(jsonEncode({'ticks': m.symbol, 'subscribe': 1}));
-     }
-   } catch (error) {
-     if (generation != connectionGeneration) return;
-     connecting = false;
-     if (mounted) setState(() => status = 'CONNECTION FAILED');
-     _reconnect();
-   }
- }
- void _reconnect() {
-   if (!mounted || reconnect?.isActive == true) return;
-   connectionGeneration++;
-   subscription?.cancel();
-   try { channel?.sink.close(); } catch (_) {}
-   channel = null;
-   connecting = false;
-   setState(() {
-     status = 'RECONNECTING';
-     for (final m in markets) { m.live = false; }
-   });
-   if (!autoReconnect) return;
-   final delay = min(30, 2 << min(reconnectAttempts++, 4));
-   reconnect = Timer(Duration(seconds: delay), _connect);
- }
- void _message(dynamic raw) {
-   try {
-     final j = jsonDecode(raw as String) as Map<String, dynamic>;
-     lastMessage = DateTime.now();
-     if (j['msg_type'] == 'error' || j['error'] != null) {
-       final error = j['error'];
-       final message = error is Map ? (error['message']?.toString() ?? 'API error') : 'API error';
-       final symbol = (j['echo_req'] is Map) ? j['echo_req']['ticks']?.toString() : null;
-       if (symbol != null && (message.toLowerCase().contains('symbol') || message.toLowerCase().contains('market'))) {
-         unsupportedSymbols.add(symbol);
-       }
-       if (mounted) setState(() {
-         status = 'FEED ERROR';
-         alerts.insert(0, 'Deriv: $message');
-         if (alerts.length > 80) alerts.removeLast();
-       });
-       return;
-     }
-     if (j['msg_type'] != 'tick') return;
-     final t = j['tick'];
-     if (t is! Map) return;
-     Market? m;
-     for (final market in markets) {
-       if (market.symbol == t['symbol']) { m = market; break; }
-     }
-     if (m == null) return;
-     final quote = t['quote'];
-     final epochValue = t['epoch'];
-     if (quote is! num || epochValue is! num) return;
-     final q = quote.toDouble();
-     final epoch = epochValue.toInt();
-     final rawPrecision = t['pip_size'];
-     final precision = rawPrecision is num ? rawPrecision.toInt() : m.precision;
-     if (precision < 0 || precision > 10) return;
-     final digits = q.toStringAsFixed(precision);
-     final digit = int.tryParse(digits.substring(digits.length - 1));
-     if (digit == null) return;
-     if (m.ticks.isNotEmpty && m.ticks.last.epoch == epoch && m.ticks.last.quote == q) return;
-     m.ticks.add(TickPoint(q, epoch, digit));
-     if (m.ticks.length > 200) m.ticks.removeAt(0);
-     m.lastSeen = DateTime.now();
-     m.live = true;
-     _trend(m);
-     _settle(m);
-     if (m.prediction == null && m.ticks.length >= 30) _predict(m);
-     if (mounted) setState(() => status = 'PUBLIC LIVE');
-   } catch (error) {
-     if (mounted) setState(() {
-       alerts.insert(0, 'Market data parsing error: $error');
-       if (alerts.length > 80) alerts.removeLast();
-     });
-   }
- }
- void _trend(Market m){if(m.ticks.length<50){m.trend='COLLECTING';return;}final xs=m.ticks.map((e)=>e.quote).toList();double ema(int n){var a=xs.first;final k=2/(n+1);for(final x in xs.skip(1)){a=x*k+a*(1-k);}return a;}final a=ema(20),b=ema(50);m.trend=a>b?'UP':a<b?'DOWN':'SIDEWAYS';m.agreement=((a-b).abs()/(xs.last.abs()+0.0001)*10000).clamp(0,100).toDouble();}
- void _predict(Market m){if(m.ticks.length<30)return;final counts=List.filled(10,0);for(final t in m.ticks)counts[t.digit]++;int best=0;for(int i=1;i<10;i++){if(counts[i]>counts[best])best=i;}m.prediction=best;m.predictedEpoch=m.ticks.last.epoch;}
- void _observe(){for(final m in markets){if(m.live&&m.ticks.length>=30){_predict(m);}}if(mounted)setState((){});}
- void _settle(Market m){if(m.prediction==null||m.predictedEpoch==null)return;if(m.ticks.last.epoch<=m.predictedEpoch!)return;final d=m.ticks.last.digit;final predicted=m.prediction!;final correct=switch(strategy){0=>d==predicted,1=>d%2==predicted%2,_=>d>predicted};observations.insert(0,Observation(m.symbol,['Matches','Even/Odd','Over/Under'][strategy],predicted,d,m.ticks.last.epoch,correct));if(observations.length>300)observations.removeLast();alerts.insert(0,'${m.name}: ${correct?'CORRECT':'INCORRECT'} • $predicted → $d');m.prediction=null;m.predictedEpoch=null;_save();}
- @override void dispose(){clock?.cancel();reconnect?.cancel();subscription?.cancel();channel?.sink.close();super.dispose();}
- Widget _card(Widget child,{EdgeInsets padding=const EdgeInsets.all(16)})=>Container(margin:const EdgeInsets.only(bottom:12),padding:padding,decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(18),border:Border.all(color:blue.withOpacity(.5))),child:child);
- Widget _pill(String text,{Color color=cyan})=>Container(padding:const EdgeInsets.symmetric(horizontal:9,vertical:5),decoration:BoxDecoration(color:color.withOpacity(.15),borderRadius:BorderRadius.circular(20)),child:Text(text,style:TextStyle(color:color,fontSize:11,fontWeight:FontWeight.bold)));
- Widget _metric(String value,String label)=>Expanded(child:_card(Column(children:[Text(value,style:const TextStyle(fontSize:24,fontWeight:FontWeight.bold,color:cyan)),Text(label,style:const TextStyle(fontSize:10))])));
- Widget _marketCard(Market m){final n=m.prediction;return _card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[Expanded(child:Text(m.name,style:const TextStyle(fontSize:18,fontWeight:FontWeight.bold))),_pill(m.live?'● LIVE':'● WAIT',color:m.live?green:Colors.orange)]),Text(m.symbol,style:const TextStyle(color:Colors.white60)),const SizedBox(height:12),Row(children:[Expanded(child:Column(children:[const Text('NEXT DIGIT',style:TextStyle(fontSize:10)),Container(width:72,height:72,alignment:Alignment.center,decoration:const BoxDecoration(shape:BoxShape.circle,gradient:LinearGradient(colors:[blue,cyan])),child:Text(n?.toString()??'⌛',style:const TextStyle(fontSize:36,fontWeight:FontWeight.bold)))])),Expanded(flex:2,child:Column(children:[Text(n==null?'COLLECTING':'Historical frequency ${m.frequency.toStringAsFixed(1)}%',style:const TextStyle(color:Colors.amber,fontWeight:FontWeight.bold,fontSize:12)),const SizedBox(height:8),Text(n==null?'WAITING FOR DATA':'NEXT SCAN IN ${remaining}s',style:const TextStyle(fontWeight:FontWeight.bold)),const SizedBox(height:7),Text('Trend: ${m.trend} • ${m.ticks.length} ticks',style:const TextStyle(fontSize:12,color:Colors.white70))]))]),const SizedBox(height:7),const Text('Historical frequency is not a verified win probability.',style:TextStyle(fontSize:10,color:Colors.white54))]));}
- Widget _radar(){final valid=markets.where((m)=>m.live).length;final accuracy=observations.isEmpty?null:100*observations.where((o)=>o.correct).length/observations.length;return Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[_pill(status,color:status=='PUBLIC LIVE'?green:Colors.orange),const Spacer(),Text('$valid/${markets.length} feeds')]),const SizedBox(height:14),const Text('Volatility Predictions',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),const Text('Live digit observations across Volatility Indices',style:TextStyle(color:Colors.white70,fontSize:12)),const SizedBox(height:12),Wrap(spacing:6,children:List.generate(3,(i)=>ChoiceChip(label:Text(['Matches','Even / Odd','Over / Under'][i]),selected:strategy==i,onSelected:(_)=>setState(()=>strategy=i)))),const SizedBox(height:12),Row(children:[_metric(accuracy==null?'—':'${accuracy.toStringAsFixed(1)}%','OBSERVED ACCURACY'),const SizedBox(width:7),_metric('${observations.length}','OBSERVATIONS')]),Row(children:[_metric('$valid','LIVE FEEDS'),const SizedBox(width:7),_metric('${markets.where((m)=>m.prediction!=null).length}','ANALYZING')]),Row(children:[const Text('All markets',style:TextStyle(fontSize:19,fontWeight:FontWeight.bold)),const Spacer(),IconButton(onPressed:()=>setState(()=>grid=!grid),icon:Icon(grid?Icons.view_agenda:Icons.grid_view)),Switch(value:autoScan,onChanged:(v){setState(()=>autoScan=v);_save();})]),...markets.map(_marketCard)]);}
- Widget _analyzer(){final m=markets.firstWhere((m)=>m.symbol==selected);final counts=List.generate(10,(i)=>m.ticks.where((x)=>x.digit==i).length);return Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Expert Analyzer',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),_card(DropdownButton<String>(isExpanded:true,value:selected,items:markets.map((m)=>DropdownMenuItem(value:m.symbol,child:Text(m.name))).toList(),onChanged:(s)=>setState(()=>selected=s!))),_card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[Text(m.name,style:const TextStyle(fontSize:20,fontWeight:FontWeight.bold)),const Spacer(),_pill(m.live?'LIVE':'WAIT',color:m.live?green:Colors.orange)]),const SizedBox(height:10),Text('Trend: ${m.trend}',style:const TextStyle(fontSize:22,color:cyan)),Text('Last digit: ${m.lastDigit??'—'} • ${m.ticks.length} ticks'),const SizedBox(height:16),SizedBox(height:100,child:CustomPaint(painter:SparkPainter(m.ticks.map((e)=>e.quote).toList()),child:const SizedBox.expand())),const SizedBox(height:12),const Text('Live tick chart (not closed candles)',style:TextStyle(fontSize:11,color:Colors.white60))])),_card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Digit Distribution',style:TextStyle(fontSize:19,fontWeight:FontWeight.bold)),for(int i=0;i<10;i++)Padding(padding:const EdgeInsets.symmetric(vertical:5),child:Row(children:[SizedBox(width:20,child:Text('$i')),Expanded(child:LinearProgressIndicator(value:m.ticks.isEmpty?0:counts[i]/m.ticks.length,color:cyan,minHeight:8,backgroundColor:Colors.white12)),const SizedBox(width:10),SizedBox(width:52,child:Text(m.ticks.isEmpty?'—':'${(counts[i]*100/m.ticks.length).toStringAsFixed(1)}%'))]))])),FilledButton(onPressed:()=>setState(()=>_predict(m)),child:const Text('REFRESH ANALYSIS'))]);}
- Widget _trades()=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Trades',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),_card(const Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('BROKER EXECUTION DISABLED',style:TextStyle(color:Colors.amber,fontWeight:FontWeight.bold)),SizedBox(height:8),Text('This build receives public market ticks. It does not authenticate an account or submit broker orders. No trade or profit is fabricated.'),SizedBox(height:8),Text('Demo order execution requires a separate authenticated integration and contract confirmation.')]))]);
- Widget _history()=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Observation History',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),...observations.take(100).map((o)=>_card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('${o.symbol} • ${o.strategy} • ${o.correct?'CORRECT':'INCORRECT'}',style:TextStyle(color:o.correct?green:red,fontWeight:FontWeight.bold)),Text('Predicted ${o.predicted} • Observed ${o.observed} • Epoch ${o.epoch}')])))]);
- Widget _journal(){final wins=observations.where((x)=>x.correct).length;return Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Trading Journal',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),Row(children:[_metric('${observations.length}','TOTAL'),const SizedBox(width:6),_metric('$wins','CORRECT'),const SizedBox(width:6),_metric('${observations.length-wins}','INCORRECT')]),_card(Text('Observed accuracy: ${observations.isEmpty?'Not measured':'${(wins*100/observations.length).toStringAsFixed(1)}%'}\nObservations are not broker trades.')), _card(TextField(maxLines:4,decoration:const InputDecoration(labelText:'Your notes',hintText:'Write a trading observation...'),onChanged:(v)=>note=v)),FilledButton(onPressed:()async{final p=await SharedPreferences.getInstance();await p.setString('journalNote',note);if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Note saved locally')));},child:const Text('SAVE NOTE'))]);}
- Widget _alerts()=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Alerts',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),_card(SwitchListTile(title:const Text('Observation alerts'),subtitle:const Text('Local result notifications in the app'),value:sound,onChanged:(v){setState(()=>sound=v);_save();})),...alerts.take(80).map((a)=>_card(Text(a)))]);
- Widget _settings()=>Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Settings',style:TextStyle(fontSize:25,fontWeight:FontWeight.bold)),_card(Column(children:[SwitchListTile(title:const Text('Automatic scanning'),value:autoScan,onChanged:(v){setState(()=>autoScan=v);_save();}),SwitchListTile(title:const Text('Auto reconnect'),value:autoReconnect,onChanged:(v){setState(()=>autoReconnect=v);_save();}),SwitchListTile(title:const Text('In-app alerts'),value:sound,onChanged:(v){setState(()=>sound=v);_save();}),const ListTile(title:Text('Market feed'),subtitle:Text('Deriv public WebSocket • app_id 1089')),const ListTile(title:Text('Trading mode'),subtitle:Text('Read-only • No broker orders'))])),FilledButton(onPressed:(){autoReconnect=true;reconnect?.cancel();_reconnect();reconnect?.cancel();_connect();},child:const Text('RECONNECT MARKET FEED'))]);
- @override
- Widget build(BuildContext context) {
-   final pages = <Widget Function()>[
-     _radar, _analyzer, _trades, _history, _journal, _alerts, _settings,
-   ];
-   final names = ['Radar', 'Analyzer', 'Trades', 'History', 'Journal', 'Alerts', 'Settings'];
-   final icons = [
-     Icons.radar, Icons.bar_chart, Icons.swap_horiz, Icons.history,
-     Icons.article_outlined, Icons.notifications_outlined, Icons.settings_outlined,
-   ];
-   return Scaffold(
-     appBar: AppBar(
-       backgroundColor: panel,
-       title: const Column(
-         crossAxisAlignment: CrossAxisAlignment.start,
-         children: [
-           Text('V11 Expert Trader PRO', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
-           Text('Deriv • Market scanner', style: TextStyle(fontSize: 11, color: Colors.white70)),
-         ],
-       ),
-       actions: [
-         Padding(
-           padding: const EdgeInsets.only(right: 10),
-           child: Center(child: _pill('PUBLIC DATA', color: green)),
-         ),
-       ],
-     ),
-     body: SafeArea(
-       child: Column(
-         children: [
-           Expanded(
-             child: ListView(
-               padding: const EdgeInsets.all(14),
-               children: [pages[tab]()],
-             ),
-           ),
-           Container(
-             height: 69,
-             decoration: BoxDecoration(
-               color: panel,
-               border: Border(top: BorderSide(color: blue.withOpacity(.4))),
-             ),
-             child: ListView.builder(
-               scrollDirection: Axis.horizontal,
-               itemCount: names.length,
-               itemBuilder: (context, i) => InkWell(
-                 onTap: () => setState(() => tab = i),
-                 child: Container(
-                   width: MediaQuery.sizeOf(context).width / 6.2,
-                   padding: const EdgeInsets.symmetric(vertical: 7),
-                   decoration: BoxDecoration(
-                     color: tab == i ? blue.withOpacity(.2) : Colors.transparent,
-                     borderRadius: BorderRadius.circular(12),
-                   ),
-                   child: Column(
-                     mainAxisAlignment: MainAxisAlignment.center,
-                     children: [
-                       Icon(icons[i], size: 22, color: tab == i ? cyan : Colors.white70),
-                       const SizedBox(height: 3),
-                       Text(names[i], style: TextStyle(fontSize: 10, color: tab == i ? cyan : Colors.white70)),
-                     ],
-                   ),
-                 ),
-               ),
-             ),
-           ),
-         ],
-       ),
-     ),
-   );
- }
 
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData.dark(useMaterial3: true).copyWith(
+          scaffoldBackgroundColor: bg,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: cyan,
+            brightness: Brightness.dark,
+          ),
+        ),
+        home: const Dashboard(),
+      );
 }
-class SparkPainter extends CustomPainter {final List<double> values;SparkPainter(this.values);@override void paint(Canvas canvas,Size size){if(values.length<2)return;final a=values.length>80?values.sublist(values.length-80):values;final lo=a.reduce(min),hi=a.reduce(max),range=max(hi-lo,.00001);final path=Path();for(var i=0;i<a.length;i++){final x=i*size.width/(a.length-1),y=size.height-(a[i]-lo)/range*size.height;if(i==0){path.moveTo(x,y);}else{path.lineTo(x,y);}}canvas.drawPath(path,Paint()..color=cyan..style=PaintingStyle.stroke..strokeWidth=2);}@override bool shouldRepaint(covariant SparkPainter old)=>true;}
+
+class TickPoint {
+  final double quote;
+  final int epoch;
+  final int digit;
+
+  TickPoint(this.quote, this.epoch, this.digit);
+}
+
+class Market {
+  final String symbol;
+  final String name;
+  final int precision;
+  final List<TickPoint> ticks = [];
+
+  bool live = false;
+  int? prediction;
+  int? predictedEpoch;
+  DateTime? predictionDeadline;
+  int predictionStrategy = 0;
+  String trend = 'WAIT';
+  double agreement = 0;
+  DateTime? lastSeen;
+
+  Market(this.symbol, this.name, this.precision);
+
+  int? get lastDigit => ticks.isEmpty ? null : ticks.last.digit;
+
+  double get frequency {
+    if (prediction == null || ticks.isEmpty) return 0;
+    return ticks.where((e) => e.digit == prediction).length /
+        ticks.length *
+        100;
+  }
+}
+
+class Observation {
+  final String symbol;
+  final String strategy;
+  final int predicted;
+  final int observed;
+  final int epoch;
+  final bool correct;
+
+  Observation(
+    this.symbol,
+    this.strategy,
+    this.predicted,
+    this.observed,
+    this.epoch,
+    this.correct,
+  );
+
+  Map<String, dynamic> toJson() => {
+        'symbol': symbol,
+        'strategy': strategy,
+        'predicted': predicted,
+        'observed': observed,
+        'epoch': epoch,
+        'correct': correct,
+      };
+
+  factory Observation.fromJson(Map<String, dynamic> j) => Observation(
+        j['symbol'],
+        j['strategy'],
+        j['predicted'],
+        j['observed'],
+        j['epoch'],
+        j['correct'],
+      );
+}
+
+class Dashboard extends StatefulWidget {
+  const Dashboard({super.key});
+
+  @override
+  State<Dashboard> createState() => _DashboardState();
+}
+
+class _DashboardState extends State<Dashboard> {
+  final markets = [
+    Market('R_10', 'Volatility 10', 3),
+    Market('R_25', 'Volatility 25', 3),
+    Market('R_50', 'Volatility 50', 4),
+    Market('R_75', 'Volatility 75', 4),
+    Market('R_100', 'Volatility 100', 2),
+    Market('1HZ10V', 'Volatility 10 (1s)', 2),
+    Market('1HZ25V', 'Volatility 25 (1s)', 2),
+    Market('1HZ50V', 'Volatility 50 (1s)', 2),
+    Market('1HZ75V', 'Volatility 75 (1s)', 2),
+    Market('1HZ100V', 'Volatility 100 (1s)', 2),
+  ];
+
+  final observations = <Observation>[];
+  final alerts = <String>[];
+  final unsupportedSymbols = <String>{};
+
+  WebSocketChannel? channel;
+  StreamSubscription? subscription;
+  Timer? clock;
+  Timer? reconnect;
+  Timer? heartbeat;
+
+  int tab = 0;
+  int strategy = 0;
+  int remaining = 10;
+  int reconnectAttempts = 0;
+  int connectionGeneration = 0;
+
+  bool grid = false;
+  bool autoScan = true;
+  bool sound = true;
+  bool autoReconnect = true;
+  bool connecting = false;
+
+  String status = 'CONNECTING';
+  String selected = 'R_25';
+  String note = '';
+
+  DateTime? lastMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _connect();
+
+    clock = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+
+      setState(() {
+        remaining = remaining <= 1 ? 10 : remaining - 1;
+
+        for (final m in markets) {
+          if (m.lastSeen != null &&
+              DateTime.now().difference(m.lastSeen!).inSeconds > 12) {
+            m.live = false;
+          }
+        }
+      });
+
+      if (autoScan && remaining == 10) {
+        _observe();
+      }
+
+      if (lastMessage != null &&
+          DateTime.now().difference(lastMessage!).inSeconds > 35 &&
+          (status == 'PUBLIC LIVE' || status == 'SUBSCRIBING')) {
+        _reconnect();
+      }
+    });
+  }
+
+  Future<void> _load() async {
+    final p = await SharedPreferences.getInstance();
+    if (!mounted) return;
+
+    setState(() {
+      autoScan = p.getBool('autoScan') ?? true;
+      autoReconnect = p.getBool('autoReconnect') ?? true;
+      sound = p.getBool('sound') ?? true;
+      note = p.getString('journalNote') ?? '';
+
+      final raw = p.getStringList('observations') ?? [];
+
+      for (final x in raw) {
+        try {
+          observations.add(
+            Observation.fromJson(
+              Map<String, dynamic>.from(jsonDecode(x)),
+            ),
+          );
+        } catch (_) {}
+      }
+    });
+  }
+
+  Future<void> _save() async {
+    final p = await SharedPreferences.getInstance();
+
+    await p.setBool('autoScan', autoScan);
+    await p.setBool('autoReconnect', autoReconnect);
+    await p.setBool('sound', sound);
+    await p.setStringList(
+      'observations',
+      observations.take(300).map((x) => jsonEncode(x.toJson())).toList(),
+    );
+  }
+
+  Future<void> _connect() async {
+    if (!mounted || connecting) return;
+
+    reconnect?.cancel();
+
+    final generation = ++connectionGeneration;
+    connecting = true;
+
+    setState(() => status = 'CONNECTING');
+
+    try {
+      await subscription?.cancel();
+
+      try {
+        await channel?.sink.close();
+      } catch (_) {}
+
+      final ws = WebSocketChannel.connect(
+        Uri.parse(
+          'wss://ws.derivws.com/websockets/v3?app_id=1089',
+        ),
+      );
+
+      channel = ws;
+
+      await ws.ready.timeout(const Duration(seconds: 15));
+
+      if (!mounted || generation != connectionGeneration) {
+        await ws.sink.close();
+        return;
+      }
+
+      subscription = ws.stream.listen(
+        _message,
+        onError: (Object error) {
+          if (generation == connectionGeneration) {
+            _addAlert('Connection error: $error');
+            _reconnect();
+          }
+        },
+        onDone: () {
+          if (generation == connectionGeneration) {
+            _reconnect();
+          }
+        },
+        cancelOnError: true,
+      );
+
+      connecting = false;
+      lastMessage = DateTime.now();
+
+      setState(() => status = 'SUBSCRIBING');
+
+      for (final m in markets) {
+        if (!unsupportedSymbols.contains(m.symbol)) {
+          ws.sink.add(
+            jsonEncode({
+              'ticks': m.symbol,
+              'subscribe': 1,
+            }),
+          );
+        }
+      }
+
+      heartbeat?.cancel();
+      heartbeat = Timer.periodic(
+        const Duration(seconds: 25),
+        (_) {
+          if (generation != connectionGeneration) return;
+          try {
+            ws.sink.add(jsonEncode({'ping': 1}));
+          } catch (_) {
+            _reconnect();
+          }
+        },
+      );
+    } catch (error) {
+      if (generation != connectionGeneration) return;
+
+      connecting = false;
+      _addAlert('Connection failed: $error');
+
+      if (mounted) {
+        setState(() => status = 'CONNECTION FAILED');
+        _reconnect();
+      }
+    }
+  }
+
+  void _reconnect() {
+    if (!mounted || reconnect?.isActive == true) return;
+
+    connectionGeneration++;
+    heartbeat?.cancel();
+    subscription?.cancel();
+
+    try {
+      channel?.sink.close();
+    } catch (_) {}
+
+    channel = null;
+    connecting = false;
+
+    setState(() {
+      status = 'RECONNECTING';
+      for (final m in markets) {
+        m.live = false;
+      }
+    });
+
+    if (!autoReconnect) return;
+
+    final delay = min(
+      30,
+      2 << min(reconnectAttempts++, 4),
+    );
+
+    reconnect = Timer(
+      Duration(seconds: delay),
+      _connect,
+    );
+  }
+
+  void _addAlert(String message) {
+    if (!mounted) return;
+
+    setState(() {
+      alerts.insert(0, message);
+      if (alerts.length > 80) {
+        alerts.removeLast();
+      }
+    });
+  }
+
+  void _message(dynamic raw) {
+    try {
+      final j = jsonDecode(raw as String) as Map<String, dynamic>;
+      lastMessage = DateTime.now();
+
+      if (j['error'] != null) {
+        final error = j['error'];
+        final message = error is Map
+            ? (error['message']?.toString() ?? 'API error')
+            : 'API error';
+
+        final echo = j['echo_req'];
+        final symbol =
+            echo is Map ? echo['ticks']?.toString() : null;
+
+        if (symbol != null &&
+            (message.toLowerCase().contains('symbol') ||
+                message.toLowerCase().contains('market'))) {
+          unsupportedSymbols.add(symbol);
+        }
+
+        _addAlert('Deriv: $message');
+
+        if (mounted) {
+          setState(() => status = 'FEED ERROR');
+        }
+        return;
+      }
+
+      if (j['msg_type'] != 'tick') return;
+
+      final t = j['tick'];
+      if (t is! Map) return;
+
+      Market? m;
+      for (final market in markets) {
+        if (market.symbol == t['symbol']) {
+          m = market;
+          break;
+        }
+      }
+
+      if (m == null ||
+          t['quote'] is! num ||
+          t['epoch'] is! num) {
+        return;
+      }
+
+      final q = (t['quote'] as num).toDouble();
+      final epoch = (t['epoch'] as num).toInt();
+      final rawPrecision = t['pip_size'];
+      final precision =
+          rawPrecision is num ? rawPrecision.toInt() : m.precision;
+
+      if (precision < 0 || precision > 10) return;
+
+      final formatted = q.toStringAsFixed(precision);
+      final digit = int.tryParse(
+        formatted.substring(formatted.length - 1),
+      );
+
+      if (digit == null) return;
+
+      if (m.ticks.isNotEmpty &&
+          m.ticks.last.epoch == epoch &&
+          m.ticks.last.quote == q) {
+        return;
+      }
+
+      m.ticks.add(TickPoint(q, epoch, digit));
+
+      if (m.ticks.length > 200) {
+        m.ticks.removeAt(0);
+      }
+
+      m.lastSeen = DateTime.now();
+      m.live = true;
+      reconnectAttempts = 0;
+
+      _trend(m);
+      _settle(m);
+
+      if (mounted) {
+        setState(() => status = 'PUBLIC LIVE');
+      }
+    } catch (error) {
+      _addAlert('Market data parsing error: $error');
+    }
+  }
+
+  void _trend(Market m) {
+    if (m.ticks.length < 50) {
+      m.trend = 'COLLECTING';
+      return;
+    }
+
+    final xs = m.ticks.map((e) => e.quote).toList();
+
+    double ema(int n) {
+      var a = xs.first;
+      final k = 2 / (n + 1);
+
+      for (final x in xs.skip(1)) {
+        a = x * k + a * (1 - k);
+      }
+
+      return a;
+    }
+
+    final a = ema(20);
+    final b = ema(50);
+
+    m.trend = a > b
+        ? 'UP'
+        : a < b
+            ? 'DOWN'
+            : 'SIDEWAYS';
+
+    m.agreement = ((a - b).abs() /
+            (xs.last.abs() + 0.0001) *
+            10000)
+        .clamp(0, 100)
+        .toDouble();
+  }
+
+  void _predict(Market m) {
+    if (!m.live ||
+        m.ticks.length < 100 ||
+        m.prediction != null) {
+      return;
+    }
+
+    final counts = List<int>.filled(10, 0);
+
+    for (final tick in m.ticks) {
+      counts[tick.digit]++;
+    }
+
+    int best = 0;
+
+    for (int i = 1; i < 10; i++) {
+      if (counts[i] > counts[best]) {
+        best = i;
+      }
+    }
+
+    m.prediction = best;
+    m.predictedEpoch = m.ticks.last.epoch;
+    m.predictionStrategy = strategy;
+    m.predictionDeadline =
+        DateTime.now().add(const Duration(seconds: 10));
+  }
+
+  void _observe() {
+    for (final m in markets) {
+      if (m.live &&
+          m.ticks.length >= 100 &&
+          m.prediction == null) {
+        _predict(m);
+      }
+    }
+
+    if (mounted) setState(() {});
+  }
+
+  void _settle(Market m) {
+    if (m.prediction == null ||
+        m.predictionDeadline == null ||
+        m.predictedEpoch == null) {
+      return;
+    }
+
+    final deadline =
+        m.predictionDeadline!.millisecondsSinceEpoch ~/ 1000;
+
+    if (m.ticks.last.epoch < deadline ||
+        m.ticks.last.epoch <= m.predictedEpoch!) {
+      return;
+    }
+
+    final tick = m.ticks.firstWhere(
+      (t) => t.epoch >= deadline,
+      orElse: () => m.ticks.last,
+    );
+
+    final predicted = m.prediction!;
+    final observed = tick.digit;
+    final mode = m.predictionStrategy;
+
+    final correct = switch (mode) {
+      0 => observed == predicted,
+      1 => observed.isEven == predicted.isEven,
+      _ => observed > predicted,
+    };
+
+    observations.insert(
+      0,
+      Observation(
+        m.symbol,
+        ['Matches', 'Even/Odd', 'Over/Under'][mode],
+        predicted,
+        observed,
+        tick.epoch,
+        correct,
+      ),
+    );
+
+    if (observations.length > 300) {
+      observations.removeLast();
+    }
+
+    if (sound) {
+      _addAlert(
+        '${m.name}: ${correct ? 'CORRECT' : 'INCORRECT'}'
+        ' • $predicted → $observed',
+      );
+    }
+
+    m.prediction = null;
+    m.predictedEpoch = null;
+    m.predictionDeadline = null;
+
+    _save();
+  }
+
+  @override
+  void dispose() {
+    clock?.cancel();
+    reconnect?.cancel();
+    heartbeat?.cancel();
+    subscription?.cancel();
+    channel?.sink.close();
+    super.dispose();
+  }
+
+  Widget _card(
+    Widget child, {
+    EdgeInsets padding = const EdgeInsets.all(16),
+  }) =>
+      Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: padding,
+        decoration: BoxDecoration(
+          color: panel,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: blue.withOpacity(.5)),
+        ),
+        child: child,
+      );
+
+  Widget _pill(String text, {Color color = cyan}) => Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: 9,
+          vertical: 5,
+        ),
+        decoration: BoxDecoration(
+          color: color.withOpacity(.15),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          text,
+          style: TextStyle(
+            color: color,
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      );
+
+  Widget _metric(String value, String label) => Expanded(
+        child: _card(
+          Column(
+            children: [
+              Text(
+                value,
+                style: const TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: cyan,
+                ),
+              ),
+              Text(
+                label,
+                style: const TextStyle(fontSize: 10),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  Widget _marketCard(Market m) {
+    final n = m.prediction;
+
+    return _card(
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  m.name,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              _pill(
+                m.live ? '● LIVE' : '● WAIT',
+                color: m.live ? green : Colors.orange,
+              ),
+            ],
+          ),
+          Text(
+            m.symbol,
+            style: const TextStyle(color: Colors.white60),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  children: [
+                    const Text(
+                      'NEXT DIGIT',
+                      style: TextStyle(fontSize: 10),
+                    ),
+                    Container(
+                      width: 72,
+                      height: 72,
+                      alignment: Alignment.center,
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(
+                          colors: [blue, cyan],
+                        ),
+                      ),
+                      child: Text(
+                        n?.toString() ?? '⌛',
+                        style: const TextStyle(
+                          fontSize: 36,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                flex: 2,
+                child: Column(
+                  children: [
+                    Text(
+                      n == null
+                          ? 'COLLECTING'
+                          : 'Historical frequency ${m.frequency.toStringAsFixed(1)}%',
+                      style: const TextStyle(
+                        color: Colors.amber,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      n == null
+                          ? 'WAITING FOR DATA'
+                          : 'NEXT SCAN IN ${remaining}s',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    Text(
+                      'Trend: ${m.trend} • ${m.ticks.length} ticks',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 7),
+          const Text(
+            'Historical frequency is not a verified win probability.',
+            style: TextStyle(
+              fontSize: 10,
+              color: Colors.white54,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _radar() {
+    final valid = markets.where((m) => m.live).length;
+    final accuracy = observations.isEmpty
+        ? null
+        : 100 *
+            observations.where((o) => o.correct).length /
+            observations.length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            _pill(
+              status,
+              color: status == 'PUBLIC LIVE'
+                  ? green
+                  : Colors.orange,
+            ),
+            const Spacer(),
+            Text('$valid/${markets.length} feeds'),
+          ],
+        ),
+        const SizedBox(height: 14),
+        const Text(
+          'Volatility Predictions',
+          style: TextStyle(
+            fontSize: 25,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const Text(
+          'Live digit observations across Volatility Indices',
+          style: TextStyle(
+            color: Colors.white70,
+            fontSize: 12,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 6,
+          children: List.generate(
+            3,
+            (i) => ChoiceChip(
+              label: Text(
+                ['Matches', 'Even / Odd', 'Over / Under'][i],
+              ),
+              selected: strategy == i,
+              onSelected: (_) {
+                setState(() => strategy = i);
+              },
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            _metric(
+              accuracy == null
+                  ? '—'
+                  : '${accuracy.toStringAsFixed(1)}%',
+              'OBSERVED ACCURACY',
+            ),
+            const SizedBox(width: 7),
+            _metric(
+              '${observations.length}',
+              'OBSERVATIONS',
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            _metric('$valid', 'LIVE FEEDS'),
+            const SizedBox(width: 7),
+            _metric(
+              '${markets.where((m) => m.prediction != null).length}',
+              'ANALYZING',
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            const Text(
+              'All markets',
+              style: TextStyle(
+                fontSize: 19,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const Spacer(),
+            IconButton(
+              onPressed: () => setState(() => grid = !grid),
+              icon: Icon(
+                grid ? Icons.view_agenda : Icons.grid_view,
+              ),
+            ),
+            Switch(
+              value: autoScan,
+              onChanged: (v) {
+                setState(() => autoScan = v);
+                _save();
+              },
+            ),
+          ],
+        ),
+        ...markets.map(_marketCard),
+      ],
+    );
+  }
+
+  Widget _analyzer() {
+    final m = markets.firstWhere(
+      (m) => m.symbol == selected,
+    );
+
+    final counts = List.generate(
+      10,
+      (i) => m.ticks.where((x) => x.digit == i).length,
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Expert Analyzer',
+          style: TextStyle(
+            fontSize: 25,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        _card(
+          DropdownButton<String>(
+            isExpanded: true,
+            value: selected,
+            items: markets
+                .map(
+                  (m) => DropdownMenuItem(
+                    value: m.symbol,
+                    child: Text(m.name),
+                  ),
+                )
+                .toList(),
+            onChanged: (s) {
+              if (s != null) {
+                setState(() => selected = s);
+              }
+            },
+          ),
+        ),
+        _card(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      m.name,
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  _pill(
+                    m.live ? 'LIVE' : 'WAIT',
+                    color: m.live ? green : Colors.orange,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Trend: ${m.trend}',
+                style: const TextStyle(
+                  fontSize: 22,
+                  color: cyan,
+                ),
+              ),
+              Text(
+                'Last digit: ${m.lastDigit ?? '—'} • ${m.ticks.length} ticks',
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                height: 100,
+                child: CustomPaint(
+                  painter: SparkPainter(
+                    m.ticks.map((e) => e.quote).toList(),
+                  ),
+                  child: const SizedBox.expand(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Live tick chart (not closed candles)',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.white60,
+                ),
+              ),
+            ],
+          ),
+        ),
+        _card(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Digit Distribution',
+                style: TextStyle(
+                  fontSize: 19,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              for (int i = 0; i < 10; i++)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 5),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 20,
+                        child: Text('$i'),
+                      ),
+                      Expanded(
+                        child: LinearProgressIndicator(
+                          value: m.ticks.isEmpty
+                              ? 0
+                              : counts[i] / m.ticks.length,
+                          color: cyan,
+                          minHeight: 8,
+                          backgroundColor: Colors.white12,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      SizedBox(
+                        width: 52,
+                        child: Text(
+                          m.ticks.isEmpty
+                              ? '—'
+                              : '${(counts[i] * 100 / m.ticks.length).toStringAsFixed(1)}%',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+        FilledButton(
+          onPressed: () {
+            setState(() => _predict(m));
+          },
+          child: const Text('REFRESH ANALYSIS'),
+        ),
+      ],
+    );
+  }
+
+  Widget _trades() => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Trades',
+            style: TextStyle(
+              fontSize: 25,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          _card(
+            const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'BROKER EXECUTION DISABLED',
+                  style: TextStyle(
+                    color: Colors.amber,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'This build receives public market ticks. '
+                  'It does not authenticate an account or submit broker orders. '
+                  'No trade or profit is fabricated.',
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Demo order execution requires a separate authenticated '
+                  'integration and contract confirmation.',
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+
+  Widget _history() => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Observation History',
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          ...observations.take(100).map(
+                (o) => _card(
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${o.symbol} • ${o.strategy} • '
+                        '${o.correct ? 'CORRECT' : 'INCORRECT'}',
+                        style: TextStyle(
+                          color: o.correct ? green : red,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        'Predicted ${o.predicted} • '
+                        'Observed ${o.observed} • '
+                        'Epoch ${o.epoch}',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+        ],
+      );
+
+  Widget _journal() {
+    final wins = observations.where((x) => x.correct).length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Trading Journal',
+          style: TextStyle(
+            fontSize: 25,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        Row(
+          children: [
+            _metric('${observations.length}', 'TOTAL'),
+            const SizedBox(width: 6),
+            _metric('$wins', 'CORRECT'),
+            const SizedBox(width: 6),
+            _metric(
+              '${observations.length - wins}',
+              'INCORRECT',
+            ),
+          ],
+        ),
+        _card(
+          Text(
+            'Observed accuracy: '
+            '${observations.isEmpty ? 'Not measured' : '${(wins * 100 / observations.length).toStringAsFixed(1)}%'}'
+            '\nObservations are not broker trades.',
+          ),
+        ),
+        _card(
+          TextField(
+            controller: TextEditingController(text: note)
+              ..selection = TextSelection.collapsed(
+                offset: note.length,
+              ),
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'Your notes',
+              hintText: 'Write a trading observation...',
+            ),
+            onChanged: (v) => note = v,
+          ),
+        ),
+        FilledButton(
+          onPressed: () async {
+            final p = await SharedPreferences.getInstance();
+            await p.setString('journalNote', note);
+
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Note saved locally'),
+                ),
+              );
+            }
+          },
+          child: const Text('SAVE NOTE'),
+        ),
+      ],
+    );
+  }
+
+  Widget _alerts() => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Alerts',
+            style: TextStyle(
+              fontSize: 25,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          _card(
+            SwitchListTile(
+              title: const Text('Observation alerts'),
+              subtitle: const Text(
+                'Local result notifications in the app',
+              ),
+              value: sound,
+              onChanged: (v) {
+                setState(() => sound = v);
+                _save();
+              },
+            ),
+          ),
+          ...alerts.take(80).map(
+                (a) => _card(Text(a)),
+              ),
+        ],
+      );
+
+  Widget _settings() => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Settings',
+            style: TextStyle(
+              fontSize: 25,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          _card(
+            Column(
+              children: [
+                SwitchListTile(
+                  title: const Text('Automatic scanning'),
+                  value: autoScan,
+                  onChanged: (v) {
+                    setState(() => autoScan = v);
+                    _save();
+                  },
+                ),
+                SwitchListTile(
+                  title: const Text('Auto reconnect'),
+                  value: autoReconnect,
+                  onChanged: (v) {
+                    setState(() => autoReconnect = v);
+                    _save();
+                  },
+                ),
+                SwitchListTile(
+                  title: const Text('In-app alerts'),
+                  value: sound,
+                  onChanged: (v) {
+                    setState(() => sound = v);
+                    _save();
+                  },
+                ),
+                const ListTile(
+                  title: Text('Market feed'),
+                  subtitle: Text(
+                    'Deriv public WebSocket • app_id 1089',
+                  ),
+                ),
+                const ListTile(
+                  title: Text('Trading mode'),
+                  subtitle: Text(
+                    'Read-only • No broker orders',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          FilledButton(
+            onPressed: () {
+              autoReconnect = true;
+              reconnect?.cancel();
+              _reconnect();
+            },
+            child: const Text('RECONNECT MARKET FEED'),
+          ),
+        ],
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final pages = <Widget Function()>[
+      _radar,
+      _analyzer,
+      _trades,
+      _history,
+      _journal,
+      _alerts,
+      _settings,
+    ];
+
+    final names = [
+      'Radar',
+      'Analyzer',
+      'Trades',
+      'History',
+      'Journal',
+      'Alerts',
+      'Settings',
+    ];
+
+    final icons = [
+      Icons.radar,
+      Icons.bar_chart,
+      Icons.swap_horiz,
+      Icons.history,
+      Icons.article_outlined,
+      Icons.notifications_outlined,
+      Icons.settings_outlined,
+    ];
+
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: panel,
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'V11 Expert Trader PRO',
+              style: TextStyle(
+                fontSize: 19,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            Text(
+              'Deriv • Market scanner',
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.white70,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 10),
+            child: Center(
+              child: _pill(
+                'PUBLIC DATA',
+                color: green,
+              ),
+            ),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.all(14),
+                children: [pages[tab]()],
+              ),
+            ),
+            Container(
+              height: 69,
+              decoration: BoxDecoration(
+                color: panel,
+                border: Border(
+                  top: BorderSide(
+                    color: blue.withOpacity(.4),
+                  ),
+                ),
+              ),
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: names.length,
+                itemBuilder: (context, i) => InkWell(
+                  onTap: () {
+                    setState(() => tab = i);
+                  },
+                  child: Container(
+                    width: MediaQuery.sizeOf(context).width / 6.2,
+                    padding: const EdgeInsets.symmetric(vertical: 7),
+                    decoration: BoxDecoration(
+                      color: tab == i
+                          ? blue.withOpacity(.2)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          icons[i],
+                          size: 22,
+                          color: tab == i
+                              ? cyan
+                              : Colors.white70,
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          names[i],
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: tab == i
+                                ? cyan
+                                : Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class SparkPainter extends CustomPainter {
+  final List<double> values;
+
+  SparkPainter(this.values);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (values.length < 2) return;
+
+    final a = values.length > 80
+        ? values.sublist(values.length - 80)
+        : values;
+
+    final lo = a.reduce(min);
+    final hi = a.reduce(max);
+    final range = max(hi - lo, .00001);
+
+    final path = Path();
+
+    for (var i = 0; i < a.length; i++) {
+      final x = i * size.width / (a.length - 1);
+      final y = size.height -
+          (a[i] - lo) / range * size.height;
+
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
+      }
+    }
+
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = cyan
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant SparkPainter old) => true;
+}
