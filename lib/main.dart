@@ -173,11 +173,11 @@ class _DashboardState extends State<Dashboard> {
   final TextEditingController stakeController = TextEditingController(text: '0.35');
   String currency = 'USD';
   bool get demoAuthorized => accountStatus == 'DEMO AUTHENTICATED';
-  bool get canOrder => demoAuthorized && !orderPending && openContractId == null &&
+  bool get canOrder => socketReady && demoAuthorized && !orderPending && openContractId == null &&
       tradesPlaced < 6 && consecutiveLosses < 2 && sessionProfit > -1.0 && sessionProfit < 1.0;
   void _sendOrderRequest(Map<String, dynamic> request) {
     final socket = channel;
-    if (socket == null) { _log('ORDER', 'No WebSocket connection'); return; }
+    if (socket == null || !socketReady) { _log('ORDER', 'WebSocket is not connected'); return; }
     socket.sink.add(jsonEncode(request));
   }
   void _requestProposal() {
@@ -430,6 +430,10 @@ class _DashboardState extends State<Dashboard> {
     connectionGeneration++;
     heartbeat?.cancel();
     subscription?.cancel();
+    orderPending = false;
+    orderState = openContractId == null
+        ? 'DISCONNECTED'
+        : 'CONNECTION LOST — VERIFY CONTRACT IN DERIV';
 
     try {
       channel?.sink.close();
@@ -1374,7 +1378,7 @@ class _DashboardState extends State<Dashboard> {
           child: const Text('AUTHENTICATE ACCOUNT')),
       ])),
       Row(children: [
-        Expanded(child: OutlinedButton(onPressed: () { reconnect?.cancel(); _reconnect(); }, child: const Text('RECONNECT'))),
+        Expanded(child: OutlinedButton(onPressed: () { reconnect?.cancel(); autoReconnect = true; _reconnect(); }, child: const Text('RECONNECT'))),
         const SizedBox(width: 8),
         Expanded(child: OutlinedButton(onPressed: () { setState(() => diagnosticLogs.clear()); }, child: const Text('CLEAR LOG'))),
       ]),
@@ -1430,7 +1434,7 @@ class _DashboardState extends State<Dashboard> {
                 const ListTile(
                   title: Text('Trading mode'),
                   subtitle: Text(
-                    'Read-only • No broker orders',
+                    'Public scanning; demo orders require verified demo authorization',
                   ),
                 ),
               ],
