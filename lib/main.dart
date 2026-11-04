@@ -357,11 +357,10 @@ Future<void> _connect() async {
     await oldSubscription?.cancel();
     try { await oldChannel?.sink.close(); } catch (_) {}
 
-    // Legacy Deriv WebSocket hosts. Confirm the currently supported endpoint
-    // and register your own app_id in Deriv before production use.
+    // Deriv Options API public market-data WebSocket (no token needed).
+    // Demo trading requires a separate OTP-authenticated demo socket.
     const endpoints = [
-      'wss://ws.binaryws.com/websockets/v3?app_id=1089',
-      'wss://ws.derivws.com/websockets/v3?app_id=1089',
+      'wss://api.derivws.com/trading/v1/options/ws/public',
     ];
     WebSocketChannel? connectedSocket;
     for (final endpoint in endpoints) {
@@ -390,7 +389,7 @@ Future<void> _connect() async {
     connecting = false;
     if (connectedSocket == null) {
       setState(() => status = 'CONNECTION FAILED');
-      _addAlert('WebSocket handshake failed on both endpoints. Check endpoint, app ID, and network.');
+      _addAlert('Public Deriv WebSocket handshake failed. Check network and connection logs.');
       _reconnect();
       return;
     }
@@ -417,15 +416,12 @@ Future<void> _connect() async {
     );
     setState(() {
       status = 'SUBSCRIBING';
-      accountStatus = authToken.isEmpty ? 'NOT AUTHENTICATED' : 'AUTHORIZING';
+      accountStatus = 'PUBLIC DATA ONLY';
       accountId = '';
       balanceText = '—';
     });
     try {
-      if (authToken.isNotEmpty) {
-        ws.sink.add(jsonEncode({'authorize': authToken, 'req_id': 9001}));
-        _log('AUTH', 'Demo authorization requested');
-      }
+      _log('SOCKET', 'Connected to public market data; demo orders disabled');
       for (final market in markets) {
         if (unsupportedSymbols.contains(market.symbol)) continue;
         ws.sink.add(jsonEncode({
@@ -488,23 +484,13 @@ Future<void> _connect() async {
   }
 
   void _authorize(String token) {
-    final clean = token.trim();
-    if (clean.isEmpty) { _log('AUTH', 'Empty token'); setState(() => accountStatus = 'TOKEN REQUIRED'); return; }
-    authToken = clean;
-    accountStatus = 'AUTHORIZING';
-    _log('AUTH', 'Authorization requested; secret masked');
-    if (socketReady && channel != null) {
-      try {
-        channel!.sink.add(jsonEncode({'authorize': clean, 'req_id': 9001}));
-      } catch (error) {
-        _log('AUTH', 'Send failed: $error');
-        _reconnect();
-      }
-    } else {
-      _log('AUTH', 'Waiting for socket before sending authorization');
-      if (!connecting) { reconnect?.cancel(); _connect(); }
-    }
-    setState(() {});
+    // The public endpoint cannot authorize an account. Do not transmit PATs
+    // to it or silently enable trading without an OTP-authenticated demo socket.
+    tokenController.clear();
+    authToken = '';
+    _log('AUTH', 'Demo login unavailable in public-data build. OTP integration required.');
+    _addAlert('Demo trading needs account ID, App ID and OTP-authenticated demo WebSocket.');
+    setState(() => accountStatus = 'PUBLIC DATA ONLY');
   }
 
   void _addAlert(String message) {
@@ -1419,11 +1405,7 @@ Future<void> _connect() async {
         Text('Last tick: ${lastTick?.toIso8601String() ?? 'Never'}'),
       ])),
       _card(Column(children: [
-        TextField(controller: tokenController, obscureText: true, autocorrect: false,
-          decoration: const InputDecoration(labelText: 'Deriv demo API token', hintText: 'Token not saved')),
-        const SizedBox(height: 8),
-        FilledButton(onPressed: () { _authorize(tokenController.text); tokenController.clear(); },
-          child: const Text('AUTHENTICATE ACCOUNT')),
+        const Text('Public market data connection. Demo account login and trading are disabled until OTP authentication is integrated.'),
       ])),
       Row(children: [
         Expanded(child: OutlinedButton(onPressed: () { reconnect?.cancel(); _reconnect(); if (!autoReconnect) _connect(); }, child: const Text('RECONNECT'))),
