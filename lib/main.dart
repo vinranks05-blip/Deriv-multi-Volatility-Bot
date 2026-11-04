@@ -158,14 +158,6 @@ class _DashboardState extends State<Dashboard> {
   final diagnosticLogs = <String>[];
   DateTime? lastTick;
   int tickCount = 0;
-  String accountStatus = 'NOT AUTHENTICATED';
-  String accountId = '';
-  String balanceText = '—';
-  String authToken = '';
-  final tokenController = TextEditingController();
-  final diagnosticLogs = <String>[];
-  DateTime? lastTick;
-  int tickCount = 0;
 
   DateTime? lastMessage;
 
@@ -173,7 +165,6 @@ class _DashboardState extends State<Dashboard> {
   void initState() {
     super.initState();
     _load();
-    _log('APP', 'V11 upgraded diagnostics started');
     _log('APP', 'Diagnostics initialized');
     _connect();
 
@@ -249,7 +240,6 @@ class _DashboardState extends State<Dashboard> {
     connecting = true;
 
     _log('SOCKET', 'Connecting to Deriv WebSocket');
-    _log('SOCKET', 'Connecting');
     setState(() => status = 'CONNECTING');
 
     try {
