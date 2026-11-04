@@ -51,7 +51,9 @@ jobs:
 
       - name: Install dependencies
         run: flutter pub get
-
+      - name: Remove corrupted Android NDK
+        run: |
+          rm -rf "$ANDROID_HOME/ndk/28.2.13676358"
       - name: Build APK
         run: flutter build apk --debug
 
