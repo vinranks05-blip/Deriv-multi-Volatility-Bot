@@ -150,6 +150,22 @@ class _DashboardState extends State<Dashboard> {
   String status = 'CONNECTING';
   String selected = 'R_25';
   String note = '';
+  String accountStatus = 'NOT AUTHENTICATED';
+  String accountId = '';
+  String balanceText = '—';
+  String authToken = '';
+  final tokenController = TextEditingController();
+  final diagnosticLogs = <String>[];
+  DateTime? lastTick;
+  int tickCount = 0;
+  String accountStatus = 'NOT AUTHENTICATED';
+  String accountId = '';
+  String balanceText = '—';
+  String authToken = '';
+  final tokenController = TextEditingController();
+  final diagnosticLogs = <String>[];
+  DateTime? lastTick;
+  int tickCount = 0;
 
   DateTime? lastMessage;
 
@@ -157,6 +173,8 @@ class _DashboardState extends State<Dashboard> {
   void initState() {
     super.initState();
     _load();
+    _log('APP', 'V11 upgraded diagnostics started');
+    _log('APP', 'Diagnostics initialized');
     _connect();
 
     clock = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -194,6 +212,7 @@ class _DashboardState extends State<Dashboard> {
       autoReconnect = p.getBool('autoReconnect') ?? true;
       sound = p.getBool('sound') ?? true;
       note = p.getString('journalNote') ?? '';
+      // Token is intentionally not persisted in unencrypted preferences.
 
       final raw = p.getStringList('observations') ?? [];
 
@@ -229,6 +248,8 @@ class _DashboardState extends State<Dashboard> {
     final generation = ++connectionGeneration;
     connecting = true;
 
+    _log('SOCKET', 'Connecting to Deriv WebSocket');
+    _log('SOCKET', 'Connecting');
     setState(() => status = 'CONNECTING');
 
     try {
@@ -253,6 +274,7 @@ class _DashboardState extends State<Dashboard> {
         return;
       }
 
+      _log('SOCKET', 'Connected');
       subscription = ws.stream.listen(
         _message,
         onError: (Object error) {
@@ -273,9 +295,14 @@ class _DashboardState extends State<Dashboard> {
       lastMessage = DateTime.now();
 
       setState(() => status = 'SUBSCRIBING');
+      if (authToken.isNotEmpty) {
+        ws.sink.add(jsonEncode({'authorize': authToken, 'req_id': 9001}));
+        _log('AUTH', 'Authorization requested; secret masked');
+      }
 
       for (final m in markets) {
         if (!unsupportedSymbols.contains(m.symbol)) {
+          _log('FEED', 'Subscribe ${m.symbol}');
           ws.sink.add(
             jsonEncode({
               'ticks': m.symbol,
@@ -313,6 +340,7 @@ class _DashboardState extends State<Dashboard> {
   void _reconnect() {
     if (!mounted || reconnect?.isActive == true) return;
 
+    _log('RECONNECT', 'Reset; attempt ${reconnectAttempts + 1}');
     connectionGeneration++;
     heartbeat?.cancel();
     subscription?.cancel();
@@ -338,10 +366,30 @@ class _DashboardState extends State<Dashboard> {
       2 << min(reconnectAttempts++, 4),
     );
 
+    _log('RECONNECT', 'Retry in $delay seconds');
     reconnect = Timer(
       Duration(seconds: delay),
       _connect,
     );
+  }
+
+  void _log(String category, String message) {
+    if (!mounted) return;
+    final time = DateTime.now().toIso8601String().split('T').last.split('.').first;
+    diagnosticLogs.insert(0, '[$time] $category: $message');
+    if (diagnosticLogs.length > 300) diagnosticLogs.removeLast();
+  }
+
+  void _authorize(String token) {
+    final clean = token.trim();
+    if (clean.isEmpty) { _log('AUTH', 'Empty token'); return; }
+    authToken = clean;
+    accountStatus = 'AUTHORIZING';
+    _log('AUTH', 'Authorization requested; secret masked');
+    if (channel != null) {
+      channel!.sink.add(jsonEncode({'authorize': clean, 'req_id': 9001}));
+    } else { _connect(); }
+    setState(() {});
   }
 
   void _addAlert(String message) {
@@ -360,6 +408,21 @@ class _DashboardState extends State<Dashboard> {
       final j = jsonDecode(raw as String) as Map<String, dynamic>;
       lastMessage = DateTime.now();
 
+      if (j['msg_type'] == 'authorize' && j['authorize'] is Map) {
+        final a = j['authorize'] as Map;
+        accountId = a['loginid']?.toString() ?? '';
+        accountStatus = a['is_virtual'] == 1 ? 'DEMO AUTHENTICATED' : 'REAL ACCOUNT - READ ONLY';
+        _log('AUTH', 'Authorized account $accountId');
+        channel?.sink.add(jsonEncode({'balance': 1, 'subscribe': 1}));
+        setState(() {});
+        return;
+      }
+      if (j['msg_type'] == 'balance' && j['balance'] is Map) {
+        final b = j['balance'] as Map;
+        balanceText = '${b['balance'] ?? '—'} ${b['currency'] ?? ''}';
+        setState(() {});
+        return;
+      }
       if (j['error'] != null) {
         final error = j['error'];
         final message = error is Map
@@ -376,6 +439,11 @@ class _DashboardState extends State<Dashboard> {
           unsupportedSymbols.add(symbol);
         }
 
+        _log('DERIV ERROR', message);
+        if (j['echo_req'] is Map && (j['echo_req'] as Map).containsKey('authorize')) {
+          accountStatus = 'AUTH FAILED';
+          authToken = '';
+        }
         _addAlert('Deriv: $message');
 
         if (mounted) {
@@ -431,6 +499,9 @@ class _DashboardState extends State<Dashboard> {
       }
 
       m.lastSeen = DateTime.now();
+      lastTick = DateTime.now();
+      tickCount++;
+      if (m.ticks.length == 1) _log('FEED', '${m.symbol} first tick');
       m.live = true;
       reconnectAttempts = 0;
 
@@ -582,6 +653,7 @@ class _DashboardState extends State<Dashboard> {
 
   @override
   void dispose() {
+    tokenController.dispose();
     clock?.cancel();
     reconnect?.cancel();
     heartbeat?.cancel();
@@ -1177,6 +1249,35 @@ class _DashboardState extends State<Dashboard> {
         ],
       );
 
+  Widget _diagnostics() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const Text('Connection Diagnostics', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+      _card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Socket: $status'), Text('Account: $accountStatus'),
+        Text('Account ID: ${accountId.isEmpty ? '—' : accountId}'),
+        Text('Balance: $balanceText'), Text('Ticks received: $tickCount'),
+        Text('Reconnect attempts: $reconnectAttempts'),
+        Text('Last tick: ${lastTick?.toIso8601String() ?? 'Never'}'),
+      ])),
+      _card(Column(children: [
+        TextField(controller: tokenController, obscureText: true, autocorrect: false,
+          decoration: const InputDecoration(labelText: 'Deriv demo API token', hintText: 'Token not saved')),
+        const SizedBox(height: 8),
+        FilledButton(onPressed: () { _authorize(tokenController.text); tokenController.clear(); },
+          child: const Text('AUTHENTICATE ACCOUNT')),
+      ])),
+      Row(children: [
+        Expanded(child: OutlinedButton(onPressed: () { reconnect?.cancel(); _reconnect(); }, child: const Text('RECONNECT'))),
+        const SizedBox(width: 8),
+        Expanded(child: OutlinedButton(onPressed: () { setState(() => diagnosticLogs.clear()); }, child: const Text('CLEAR LOG'))),
+      ]),
+      ...diagnosticLogs.take(100).map((line) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: SelectableText(line, style: const TextStyle(fontSize: 11, fontFamily: 'monospace')))),
+    ],
+  );
+
   Widget _settings() => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1250,6 +1351,7 @@ class _DashboardState extends State<Dashboard> {
       _journal,
       _alerts,
       _settings,
+      _diagnostics,
     ];
 
     final names = [
@@ -1260,6 +1362,7 @@ class _DashboardState extends State<Dashboard> {
       'Journal',
       'Alerts',
       'Settings',
+      'Logs',
     ];
 
     final icons = [
@@ -1270,6 +1373,7 @@ class _DashboardState extends State<Dashboard> {
       Icons.article_outlined,
       Icons.notifications_outlined,
       Icons.settings_outlined,
+      Icons.terminal,
     ];
 
     return Scaffold(
@@ -1299,7 +1403,7 @@ class _DashboardState extends State<Dashboard> {
             padding: const EdgeInsets.only(right: 10),
             child: Center(
               child: _pill(
-                'PUBLIC DATA',
+                accountStatus == 'DEMO AUTHENTICATED' ? 'DEMO' : 'PUBLIC DATA',
                 color: green,
               ),
             ),
