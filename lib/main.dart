@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-void main() => runApp(const V11App());
+void main() => runApp(const V12App());
 
 const bg = Color(0xff030d26);
 const panel = Color(0xff10234b);
@@ -16,8 +16,8 @@ const blue = Color(0xff1385ff);
 const green = Color(0xff00e5a0);
 const red = Color(0xffff5275);
 
-class V11App extends StatelessWidget {
-  const V11App({super.key});
+class V12App extends StatelessWidget {
+  const V12App({super.key});
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -54,6 +54,10 @@ class Market {
   int predictionStrategy = 0;
   String trend = 'WAIT';
   double agreement = 0;
+  double? rsi;
+  double? macd;
+  double? atr;
+  int? lastSettledEpoch;
   DateTime? lastSeen;
 
   Market(this.symbol, this.name, this.precision);
@@ -166,6 +170,12 @@ class _DashboardState extends State<Dashboard> {
   double sessionProfit = 0;
   bool orderPending = false;
   int? openContractId;
+  bool contractRecoveryPending = false;
+  bool purchaseUnconfirmed = false;
+  int? activeBuyRequestId;
+  String activeOrderSymbol = '';
+  String activeOrderType = '';
+  final Set<int> settledContracts = <int>{};
   String orderState = 'IDLE';
   final List<String> orderHistory = [];
   String orderType = 'DIGITMATCH';
@@ -173,7 +183,7 @@ class _DashboardState extends State<Dashboard> {
   final TextEditingController stakeController = TextEditingController(text: '0.35');
   String currency = 'USD';
   bool get demoAuthorized => accountStatus == 'DEMO AUTHENTICATED';
-  bool get canOrder => socketReady && demoAuthorized && !orderPending && openContractId == null &&
+  bool get canOrder => socketReady && demoAuthorized && !orderPending && !purchaseUnconfirmed && !contractRecoveryPending && openContractId == null &&
       tradesPlaced < 6 && consecutiveLosses < 2 && sessionProfit > -1.0 && sessionProfit < 1.0;
   void _sendOrderRequest(Map<String, dynamic> request) {
     final socket = channel;
@@ -184,12 +194,14 @@ class _DashboardState extends State<Dashboard> {
     if (!canOrder) { _log('ORDER', 'Blocked: demo auth, limits, or open order'); return; }
     final stake = double.tryParse(stakeController.text);
     final barrier = int.tryParse(barrierController.text);
-    if (stake == null || stake < 0.35 || stake > 10 || barrier == null || barrier < 0 || barrier > 9) {
+    final needsBarrier = !['DIGITEVEN', 'DIGITODD'].contains(orderType);
+    if (stake == null || stake < 0.35 || stake > 10 ||
+        (needsBarrier && (barrier == null || barrier < 0 || barrier > 9))) {
       _log('ORDER', 'Invalid stake or barrier'); return;
     }
     final market = markets.firstWhere((m) => m.symbol == selected);
     if (!market.live) { _log('ORDER', 'Selected market feed is not live'); return; }
-    setState(() { orderPending = true; orderState = 'REQUESTING PROPOSAL'; });
+    setState(() { orderPending = true; orderState = 'REQUESTING PROPOSAL'; activeOrderSymbol = selected; activeOrderType = orderType; });
     _sendOrderRequest({'proposal': 1, 'amount': stake, 'basis': 'stake',
       'contract_type': orderType, 'currency': currency, 'duration': 10,
       'duration_unit': 't', 'symbol': selected,
@@ -209,7 +221,9 @@ class _DashboardState extends State<Dashboard> {
     if (approved != true || !demoAuthorized) {
       setState(() { orderPending = false; orderState = 'CANCELLED'; }); return;
     }
-    _sendOrderRequest({'buy': proposalId, 'price': askPrice, 'req_id': ++orderSequence});
+    activeBuyRequestId = ++orderSequence;
+    purchaseUnconfirmed = true;
+    _sendOrderRequest({'buy': proposalId, 'price': askPrice, 'req_id': activeBuyRequestId});
     setState(() => orderState = 'PURCHASE SENT');
     _log('ORDER', 'Purchase submitted; awaiting broker confirmation');
   }
@@ -227,8 +241,8 @@ class _DashboardState extends State<Dashboard> {
       final buy = j['buy'] as Map;
       final id = (buy['contract_id'] as num?)?.toInt();
       if (id == null) { _log('ORDER', 'Missing contract ID'); return; }
-      setState(() { openContractId = id; orderPending = false; tradesPlaced++; orderState = 'OPEN #$id'; });
-      orderHistory.insert(0, 'OPEN #$id • $orderType • $selected');
+      setState(() { openContractId = id; orderPending = false; purchaseUnconfirmed = false; contractRecoveryPending = false; tradesPlaced++; orderState = 'OPEN #$id'; });
+      orderHistory.insert(0, 'OPEN #$id • $activeOrderType • $activeOrderSymbol');
       _log('ORDER', 'Broker confirmed purchase #$id');
       _sendOrderRequest({'proposal_open_contract': 1, 'contract_id': id, 'subscribe': 1});
       return;
@@ -237,10 +251,12 @@ class _DashboardState extends State<Dashboard> {
       final contract = j['proposal_open_contract'] as Map;
       final id = (contract['contract_id'] as num?)?.toInt();
       if (id == null || id != openContractId) return;
-      if (contract['is_sold'] == 1) {
+      if (contract['is_sold'] == 1 && !settledContracts.contains(id)) {
         final profit = (contract['profit'] as num?)?.toDouble();
         if (profit == null) { _log('ORDER', 'Sold but no verified profit returned'); return; }
         setState(() {
+          settledContracts.add(id);
+          contractRecoveryPending = false;
           sessionProfit += profit;
           consecutiveLosses = profit < 0 ? consecutiveLosses + 1 : 0;
           orderState = 'SETTLED #$id'; openContractId = null;
@@ -326,199 +342,142 @@ class _DashboardState extends State<Dashboard> {
 
   
 Future<void> _connect() async {
-  if (!mounted || connecting) return;
+    if (!mounted || connecting) return;
+    reconnect?.cancel();
+    heartbeat?.cancel();
+    final generation = ++connectionGeneration;
+    connecting = true;
+    socketReady = false;
+    setState(() => status = 'CONNECTING');
 
-  reconnect?.cancel();
-  heartbeat?.cancel();
+    final oldSubscription = subscription;
+    final oldChannel = channel;
+    subscription = null;
+    channel = null;
+    await oldSubscription?.cancel();
+    try { await oldChannel?.sink.close(); } catch (_) {}
 
-  final generation = ++connectionGeneration;
-  connecting = true;
-  socketReady = false;
-
-  setState(() => status = 'CONNECTING');
-
-  await subscription?.cancel();
-  subscription = null;
-
-  try {
-    await channel?.sink.close();
-  } catch (_) {}
-
-  channel = null;
-
-  const endpoints = [
-    'wss://ws.derivws.com/websockets/v3?app_id=1089',
-    'wss://ws.binaryws.com/websockets/v3?app_id=1089',
-  ];
-
-  WebSocketChannel? connectedSocket;
-
-  for (final endpoint in endpoints) {
+    // Legacy Deriv WebSocket hosts. Confirm the currently supported endpoint
+    // and register your own app_id in Deriv before production use.
+    const endpoints = [
+      'wss://ws.binaryws.com/websockets/v3?app_id=1089',
+      'wss://ws.derivws.com/websockets/v3?app_id=1089',
+    ];
+    WebSocketChannel? connectedSocket;
+    for (final endpoint in endpoints) {
+      if (!mounted || generation != connectionGeneration) return;
+      WebSocketChannel? candidate;
+      try {
+        _log('SOCKET', 'Trying $endpoint');
+        candidate = WebSocketChannel.connect(Uri.parse(endpoint));
+        await candidate.ready.timeout(const Duration(seconds: 12));
+        if (!mounted || generation != connectionGeneration) {
+          await candidate.sink.close();
+          return;
+        }
+        connectedSocket = candidate;
+        _log('SOCKET', 'Handshake successful: $endpoint');
+        break;
+      } catch (error) {
+        _log('SOCKET ERROR', '$endpoint: $error');
+        try { await candidate?.sink.close(); } catch (_) {}
+      }
+    }
     if (!mounted || generation != connectionGeneration) {
-      connecting = false;
+      try { await connectedSocket?.sink.close(); } catch (_) {}
+      return;
+    }
+    connecting = false;
+    if (connectedSocket == null) {
+      setState(() => status = 'CONNECTION FAILED');
+      _addAlert('WebSocket handshake failed on both endpoints. Check endpoint, app ID, and network.');
+      _reconnect();
       return;
     }
 
-    WebSocketChannel? candidate;
-
+    final ws = connectedSocket;
+    channel = ws;
+    socketReady = true;
+    lastMessage = DateTime.now();
+    // Reset retry counter only after receiving live market data.
+    subscription = ws.stream.listen(
+      _message,
+      onError: (Object error) {
+        if (!mounted || generation != connectionGeneration) return;
+        _log('SOCKET ERROR', error.toString());
+        _addAlert('Connection error: $error');
+        _reconnect();
+      },
+      onDone: () {
+        if (!mounted || generation != connectionGeneration) return;
+        _log('SOCKET', 'Connection closed by server');
+        _reconnect();
+      },
+      cancelOnError: true,
+    );
+    setState(() {
+      status = 'SUBSCRIBING';
+      accountStatus = authToken.isEmpty ? 'NOT AUTHENTICATED' : 'AUTHORIZING';
+      accountId = '';
+      balanceText = '—';
+    });
     try {
-      _log('SOCKET', 'Trying $endpoint');
-
-      candidate = WebSocketChannel.connect(
-        Uri.parse(endpoint),
-      );
-
-      await candidate.ready.timeout(
-        const Duration(seconds: 12),
-      );
-
-      if (!mounted || generation != connectionGeneration) {
-        await candidate.sink.close();
-        connecting = false;
-        return;
+      if (authToken.isNotEmpty) {
+        ws.sink.add(jsonEncode({'authorize': authToken, 'req_id': 9001}));
+        _log('AUTH', 'Demo authorization requested');
       }
-
-      connectedSocket = candidate;
-      _log('SOCKET', 'Handshake successful: $endpoint');
-      break;
-    } catch (error) {
-      _log('SOCKET ERROR', '$endpoint: $error');
-      _addAlert('Connection failed: $error');
-
-      try {
-        await candidate?.sink.close();
-      } catch (_) {}
-    }
-  }
-
-  if (!mounted || generation != connectionGeneration) {
-    connecting = false;
-    await connectedSocket?.sink.close();
-    return;
-  }
-
-  if (connectedSocket == null) {
-    connecting = false;
-    socketReady = false;
-
-    setState(() => status = 'CONNECTION FAILED');
-    _log('SOCKET', 'All configured endpoints failed');
-    _reconnect();
-    return;
-  }
-
-  final ws = connectedSocket;
-  channel = ws;
-  socketReady = true;
-  connecting = false;
-  lastMessage = DateTime.now();
-
-  subscription = ws.stream.listen(
-    _message,
-    onError: (Object error) {
-      if (generation != connectionGeneration) return;
-
-      _log('SOCKET ERROR', error.toString());
-      _addAlert('Connection error: $error');
-      _reconnect();
-    },
-    onDone: () {
-      if (generation != connectionGeneration) return;
-
-      _log('SOCKET', 'Connection closed by server');
-      _reconnect();
-    },
-    cancelOnError: true,
-  );
-
-  setState(() => status = 'SUBSCRIBING');
-
-  try {
-    if (authToken.isNotEmpty) {
-      ws.sink.add(jsonEncode({
-        'authorize': authToken,
-        'req_id': 9001,
-      }));
-
-      _log('AUTH', 'Demo authorization requested');
-    }
-
-    for (final market in markets) {
-      if (unsupportedSymbols.contains(market.symbol)) {
-        continue;
+      for (final market in markets) {
+        if (unsupportedSymbols.contains(market.symbol)) continue;
+        ws.sink.add(jsonEncode({
+          'ticks': market.symbol,
+          'subscribe': 1,
+        }));
+        _log('FEED', 'Subscribed to ${market.symbol}');
       }
-
-      ws.sink.add(jsonEncode({
-        'ticks': market.symbol,
-        'subscribe': 1,
-      }));
-
-      _log('FEED', 'Subscribed to ${market.symbol}');
-    }
-
-    heartbeat = Timer.periodic(
-      const Duration(seconds: 25),
-      (_) {
-        if (!mounted ||
-            generation != connectionGeneration ||
-            !socketReady) {
-          return;
-        }
-
+      heartbeat = Timer.periodic(const Duration(seconds: 25), (_) {
+        if (!mounted || generation != connectionGeneration || !socketReady) return;
         try {
           ws.sink.add(jsonEncode({'ping': 1}));
         } catch (error) {
           _log('HEARTBEAT', error.toString());
           _reconnect();
         }
-      },
-    );
-  } catch (error) {
-    _log('SOCKET ERROR', 'Subscription failed: $error');
-    _reconnect();
+      });
+    } catch (error) {
+      _log('SOCKET ERROR', 'Subscription failed: $error');
+      _reconnect();
+    }
   }
-}
-
 
   void _reconnect() {
     if (!mounted || reconnect?.isActive == true) return;
-
-    _log('RECONNECT', 'Reset; attempt ${reconnectAttempts + 1}');
     connectionGeneration++;
     heartbeat?.cancel();
     subscription?.cancel();
+    subscription = null;
+    try { channel?.sink.close(); } catch (_) {}
+    channel = null;
+    socketReady = false;
+    connecting = false;
+    if (orderPending && purchaseUnconfirmed) {
+      contractRecoveryPending = true;
+      _log('ORDER', 'Purchase outcome unknown; trading blocked until reconciled');
+    }
     orderPending = false;
     orderState = openContractId == null
         ? 'DISCONNECTED'
         : 'CONNECTION LOST — VERIFY CONTRACT IN DERIV';
-
-    try {
-      channel?.sink.close();
-    } catch (_) {}
-
-    channel = null;
-    socketReady = false;
-    connecting = false;
-
     setState(() {
-      status = 'RECONNECTING';
-      for (final m in markets) {
-        m.live = false;
-      }
+      status = autoReconnect ? 'RECONNECTING' : 'DISCONNECTED';
+      accountStatus = 'NOT AUTHENTICATED';
+      accountId = '';
+      balanceText = '—';
+      for (final m in markets) { m.live = false; }
     });
-
     if (!autoReconnect) return;
-
-    final delay = min(
-      30,
-      2 << min(reconnectAttempts++, 4),
-    );
-
+    final delay = min(30, 2 << min(reconnectAttempts++, 4));
     _log('RECONNECT', 'Retry in $delay seconds');
-    reconnect = Timer(
-      Duration(seconds: delay),
-      _connect,
-    );
+    reconnect = Timer(Duration(seconds: delay), _connect);
   }
 
   void _log(String category, String message) {
@@ -564,12 +523,17 @@ Future<void> _connect() async {
       final j = jsonDecode(raw as String) as Map<String, dynamic>;
       lastMessage = DateTime.now();
 
-      if (j['msg_type'] == 'authorize' && j['authorize'] is Map) {
+      if (j['error'] == null && j['msg_type'] == 'authorize' && j['authorize'] is Map) {
         final a = j['authorize'] as Map;
         accountId = a['loginid']?.toString() ?? '';
         currency = a['currency']?.toString() ?? 'USD';
         accountStatus = (a['is_virtual'] == 1 || a['is_virtual'] == true) ? 'DEMO AUTHENTICATED' : 'REAL ACCOUNT - READ ONLY';
         _log('AUTH', 'Authorized account $accountId');
+        if (openContractId != null && demoAuthorized) {
+          contractRecoveryPending = true;
+          channel?.sink.add(jsonEncode({'proposal_open_contract': 1, 'contract_id': openContractId, 'subscribe': 1}));
+          _log('ORDER', 'Rechecking open contract #$openContractId');
+        }
         channel?.sink.add(jsonEncode({'balance': 1, 'subscribe': 1}));
         setState(() {});
         return;
@@ -582,7 +546,7 @@ Future<void> _connect() async {
       }
       if (j['error'] != null) {
         if (['proposal', 'buy'].contains(j['msg_type']) || (j['echo_req'] is Map && ((j['echo_req'] as Map).containsKey('proposal') || (j['echo_req'] as Map).containsKey('buy')))) {
-          orderPending = false; orderState = 'ORDER ERROR';
+          orderPending = false; purchaseUnconfirmed = false; orderState = 'ORDER ERROR';
         }
         final error = j['error'];
         final message = error is Map
@@ -613,7 +577,7 @@ Future<void> _connect() async {
             if (echo is Map && echo.containsKey('authorize')) {
               accountStatus = 'AUTH FAILED';
             } else if (symbol != null) {
-              status = 'FEED ERROR';
+              if (tickCount == 0) status = 'FEED ERROR';
             }
           });
         }
@@ -713,6 +677,27 @@ Future<void> _connect() async {
             ? 'DOWN'
             : 'SIDEWAYS';
 
+    // Tick-derived indicators, NOT 1m/5m/15m closed-candle signals.
+    var gains = 0.0;
+    var losses = 0.0;
+    for (var i = xs.length - 14; i < xs.length; i++) {
+      final delta = xs[i] - xs[i - 1];
+      if (delta > 0) { gains += delta; } else { losses -= delta; }
+    }
+    m.rsi = losses == 0 ? (gains == 0 ? 50.0 : 100.0)
+        : 100.0 - 100.0 / (1.0 + gains / losses);
+    double emaFor(int period) {
+      var value = xs.first;
+      final factor = 2.0 / (period + 1);
+      for (final x in xs.skip(1)) { value += factor * (x - value); }
+      return value;
+    }
+    m.macd = emaFor(12) - emaFor(26);
+    var sumMovement = 0.0;
+    for (var i = xs.length - 14; i < xs.length; i++) {
+      sumMovement += (xs[i] - xs[i - 1]).abs();
+    }
+    m.atr = sumMovement / 14; // Mean tick movement; not candle ATR.
     m.agreement = ((a - b).abs() /
             (xs.last.abs() + 0.0001) *
             10000)
@@ -775,10 +760,11 @@ Future<void> _connect() async {
       return;
     }
 
-    final tick = m.ticks.firstWhere(
-      (t) => t.epoch >= deadline,
-      orElse: () => m.ticks.last,
-    );
+    final eligible = m.ticks.where((t) => t.epoch >= deadline && t.epoch > m.predictedEpoch!).toList();
+    if (eligible.isEmpty) return;
+    final tick = eligible.first;
+    if (m.lastSettledEpoch == tick.epoch) return;
+    m.lastSettledEpoch = tick.epoch;
 
     final predicted = m.prediction!;
     final observed = tick.digit;
@@ -1177,6 +1163,9 @@ Future<void> _connect() async {
               Text(
                 'Last digit: ${m.lastDigit ?? '—'} • ${m.ticks.length} ticks',
               ),
+              Text('Tick RSI: ${m.rsi?.toStringAsFixed(1) ?? '—'} • MACD: ${m.macd?.toStringAsFixed(5) ?? '—'}'),
+              Text('Mean tick movement: ${m.atr?.toStringAsFixed(5) ?? '—'}'),
+              const Text('Tick indicators only; not closed-candle or validated win probability.', style: TextStyle(fontSize: 11, color: Colors.white60)),
               const SizedBox(height: 16),
               SizedBox(
                 height: 100,
@@ -1257,6 +1246,7 @@ Future<void> _connect() async {
     const Text('Demo Orders', style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
     _card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text('Account: $accountStatus'), Text('Order: $orderState'),
+      if (contractRecoveryPending || purchaseUnconfirmed) const Text('Trading locked: verify unresolved purchase in Deriv before restarting.', style: TextStyle(color: Colors.amber)),
       Text('Session P/L: ${sessionProfit.toStringAsFixed(2)} $currency'),
       Text('Trades: $tradesPlaced/6 • Consecutive losses: $consecutiveLosses/2'),
       if (!demoAuthorized) const Text('DEMO authorization required. Real accounts are read-only.',
@@ -1425,6 +1415,7 @@ Future<void> _connect() async {
         Text('Account ID: ${accountId.isEmpty ? '—' : accountId}'),
         Text('Balance: $balanceText'), Text('Ticks received: $tickCount'),
         Text('Reconnect attempts: $reconnectAttempts'),
+        Text('Unresolved purchase: $purchaseUnconfirmed • Recovery lock: $contractRecoveryPending'),
         Text('Last tick: ${lastTick?.toIso8601String() ?? 'Never'}'),
       ])),
       _card(Column(children: [
@@ -1435,7 +1426,7 @@ Future<void> _connect() async {
           child: const Text('AUTHENTICATE ACCOUNT')),
       ])),
       Row(children: [
-        Expanded(child: OutlinedButton(onPressed: () { reconnect?.cancel(); autoReconnect = true; _reconnect(); }, child: const Text('RECONNECT'))),
+        Expanded(child: OutlinedButton(onPressed: () { reconnect?.cancel(); _reconnect(); if (!autoReconnect) _connect(); }, child: const Text('RECONNECT'))),
         const SizedBox(width: 8),
         Expanded(child: OutlinedButton(onPressed: () { setState(() => diagnosticLogs.clear()); }, child: const Text('CLEAR LOG'))),
       ]),
@@ -1499,9 +1490,9 @@ Future<void> _connect() async {
           ),
           FilledButton(
             onPressed: () {
-              autoReconnect = true;
               reconnect?.cancel();
               _reconnect();
+              if (!autoReconnect) _connect();
             },
             child: const Text('RECONNECT MARKET FEED'),
           ),
@@ -1550,14 +1541,14 @@ Future<void> _connect() async {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'V11 Expert Trader PRO',
+              'V12 Expert Trader PRO',
               style: TextStyle(
                 fontSize: 19,
                 fontWeight: FontWeight.bold,
               ),
             ),
             Text(
-              'Deriv • Market scanner',
+              'Deriv • Demo market scanner',
               style: TextStyle(
                 fontSize: 11,
                 color: Colors.white70,
