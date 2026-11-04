@@ -1,6 +1,6 @@
 name: Build Deriv Android APK
 
-'on':
+on:
   push:
     branches:
       - main
@@ -12,7 +12,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -30,6 +29,25 @@ jobs:
 
       - name: Generate Android project
         run: flutter create --platforms=android --project-name deriv_multi_volatility_bot .
+
+      - name: Ensure Android internet permission
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path('android/app/src/main/AndroidManifest.xml')
+          ET.register_namespace('android', 'http://schemas.android.com/apk/res/android')
+          tree = ET.parse(path)
+          root = tree.getroot()
+          name = '{http://schemas.android.com/apk/res/android}name'
+          permission = 'android.permission.INTERNET'
+          if not any(node.tag == 'uses-permission' and node.get(name) == permission for node in root):
+              node = ET.Element('uses-permission', {name: permission})
+              root.insert(0, node)
+              tree.write(path, encoding='utf-8', xml_declaration=True)
+          assert any(node.tag == 'uses-permission' and node.get(name) == permission for node in ET.parse(path).getroot()), 'INTERNET permission missing'
+          print('Verified Android INTERNET permission in main manifest')
+          PY
 
       - name: Install dependencies
         run: flutter pub get
