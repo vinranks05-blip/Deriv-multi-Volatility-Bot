@@ -54,6 +54,8 @@ class Market {
   int predictionStrategy = 0;
   String trend = 'WAIT';
   double agreement = 0;
+  double nextDigitEstimate = 0;
+  String predictionMethod = 'WAITING';
   double? rsi;
   double? macd;
   double? atr;
@@ -691,32 +693,45 @@ Future<void> _connect() async {
         .toDouble();
   }
 
-  void _predict(Market m) {
-    if (!m.live ||
-        m.ticks.length < 100 ||
-        m.prediction != null) {
-      return;
-    }
-
-    final counts = List<int>.filled(10, 0);
-
-    for (final tick in m.ticks) {
-      counts[tick.digit]++;
-    }
-
-    int best = 0;
-
-    for (int i = 1; i < 10; i++) {
-      if (counts[i] > counts[best]) {
-        best = i;
+  // V12.2: One-step-ahead digit forecast. Uses only past ticks.
+  // A smoothed first-order transition model is blended with marginal
+  // digit frequencies; it is not trained on the future settlement tick.
+  // This is an experimental forecast, NOT a calibrated win probability.
+  List<double> _nextDigitScores(Market m) {
+    final history = m.ticks;
+    final global = List<double>.filled(10, 1.0); // Laplace smoothing
+    final conditional = List<double>.filled(10, 1.0);
+    if (history.isEmpty) return List<double>.filled(10, 0.1);
+    final previous = history.last.digit;
+    for (var i = 0; i < history.length; i++) {
+      global[history[i].digit]++;
+      if (i > 0 && history[i - 1].digit == previous) {
+        conditional[history[i].digit]++;
       }
     }
+    final globalSum = global.reduce((a, b) => a + b);
+    final conditionalSum = conditional.reduce((a, b) => a + b);
+    // Shrink conditional estimates toward the unconditional distribution.
+    final transitions = conditionalSum - 10;
+    final weight = transitions / (transitions + 50.0);
+    return List.generate(10, (d) =>
+      weight * conditional[d] / conditionalSum +
+      (1 - weight) * global[d] / globalSum);
+  }
 
+  void _predict(Market m) {
+    if (!m.live || m.ticks.length < 100 || m.prediction != null) return;
+    final scores = _nextDigitScores(m);
+    var best = 0;
+    for (var i = 1; i < 10; i++) {
+      if (scores[i] > scores[best]) best = i;
+    }
     m.prediction = best;
+    m.nextDigitEstimate = scores[best] * 100;
+    m.predictionMethod = 'Transition + frequency';
     m.predictedEpoch = m.ticks.last.epoch;
     m.predictionStrategy = strategy;
-    m.predictionDeadline =
-        DateTime.now().add(const Duration(seconds: 10));
+    m.predictionDeadline = DateTime.now().add(const Duration(seconds: 10));
   }
 
   void _observe() {
@@ -926,7 +941,7 @@ Future<void> _connect() async {
                     Text(
                       n == null
                           ? 'COLLECTING'
-                          : 'Historical frequency ${m.frequency.toStringAsFixed(1)}%',
+                          : 'Model estimate ${m.nextDigitEstimate.toStringAsFixed(1)}% (unvalidated)',
                       style: const TextStyle(
                         color: Colors.amber,
                         fontWeight: FontWeight.bold,
@@ -968,13 +983,95 @@ Future<void> _connect() async {
     );
   }
 
+  // V12.1: Results are observations, never broker trade outcomes.
+  List<Observation> _filteredResults({String? symbol, String? mode}) =>
+      observations.where((o) =>
+        (symbol == null || o.symbol == symbol) &&
+        (mode == null || o.strategy == mode)).toList();
+
+  String _successRate(List<Observation> sample) => sample.isEmpty
+      ? '—'
+      : '${(100 * sample.where((o) => o.correct).length / sample.length).toStringAsFixed(1)}%';
+
+  Widget _successMonitor() {
+    final selectedMode = ['Matches', 'Even/Odd', 'Over/Under'][strategy];
+    final selected = _filteredResults(mode: selectedMode);
+    final correct = selected.where((o) => o.correct).length;
+    Widget window(int size) {
+      final sample = selected.take(size).toList();
+      return Expanded(child: _metric(_successRate(sample),
+          'LAST $size (${sample.length})'));
+    }
+    return _card(Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Prediction Success Monitor',
+          style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 5),
+        Text('$selectedMode • observed outcomes, not trading wins',
+          style: const TextStyle(color: Colors.white70, fontSize: 12)),
+        const SizedBox(height: 10),
+        Row(children: [
+          _metric(_successRate(selected), 'SUCCESS RATE'),
+          const SizedBox(width: 7),
+          _metric('${selected.length}', 'OBSERVATIONS'),
+        ]),
+        Row(children: [
+          _metric('$correct', 'CORRECT'),
+          const SizedBox(width: 7),
+          _metric('${selected.length - correct}', 'INCORRECT'),
+        ]),
+        Row(children: [window(10), const SizedBox(width: 5), window(50)]),
+        Row(children: [window(100), const SizedBox(width: 5), window(300)]),
+        const SizedBox(height: 10),
+        const SizedBox(height: 10),
+        const Text('Next-digit forecast (experimental)',
+          style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 5),
+        ...markets.map((m) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(children: [
+            Expanded(child: Text(m.name, style: const TextStyle(fontSize: 12))),
+            Text(m.prediction == null ? 'Collecting' :
+              'Digit ${m.prediction} • model ${m.nextDigitEstimate.toStringAsFixed(1)}%',
+              style: const TextStyle(fontSize: 12, color: cyan)),
+          ]),
+        )),
+        const Text('Transition + frequency forecast. The percentage is a model estimate, '
+          'not validated confidence; evaluation uses a future tick after the scan deadline.',
+          style: TextStyle(color: Colors.white60, fontSize: 11)),
+        const SizedBox(height: 10),
+        const Text('Success by market',
+          style: TextStyle(fontWeight: FontWeight.bold)),
+        ...markets.map((m) {
+          final sample = _filteredResults(symbol: m.symbol, mode: selectedMode);
+          final successes = sample.where((o) => o.correct).length;
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            child: Row(children: [
+              Expanded(child: Text(m.name, style: const TextStyle(fontSize: 12))),
+              Text('$successes/${sample.length}  ${_successRate(sample)}',
+                style: const TextStyle(fontSize: 12)),
+            ]),
+          );
+        }),
+        const SizedBox(height: 5),
+        const Text('Each percentage uses only settled observations for the selected strategy. '
+          'Model estimates are not verified win probabilities. '
+          'Small samples are unreliable; outcomes do not establish profitability.',
+          style: TextStyle(color: Colors.white60, fontSize: 11)),
+      ],
+    ));
+  }
+
   Widget _radar() {
     final valid = markets.where((m) => m.live).length;
-    final accuracy = observations.isEmpty
+    final strategyResults = _filteredResults(
+      mode: ['Matches', 'Even/Odd', 'Over/Under'][strategy]);
+    final accuracy = strategyResults.isEmpty
         ? null
-        : 100 *
-            observations.where((o) => o.correct).length /
-            observations.length;
+        : 100 * strategyResults.where((o) => o.correct).length /
+            strategyResults.length;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1023,6 +1120,7 @@ Future<void> _connect() async {
           ),
         ),
         const SizedBox(height: 12),
+        _successMonitor(),
         Row(
           children: [
             _metric(
@@ -1033,7 +1131,7 @@ Future<void> _connect() async {
             ),
             const SizedBox(width: 7),
             _metric(
-              '${observations.length}',
+              '${strategyResults.length}',
               'OBSERVATIONS',
             ),
           ],
@@ -1523,7 +1621,7 @@ Future<void> _connect() async {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'V12 Expert Trader PRO',
+              'V12.2 Expert Trader PRO',
               style: TextStyle(
                 fontSize: 19,
                 fontWeight: FontWeight.bold,
