@@ -146,6 +146,7 @@ class _DashboardState extends State<Dashboard> {
   bool sound = true;
   bool autoReconnect = true;
   bool connecting = false;
+  bool socketReady = false;
 
   String status = 'CONNECTING';
   String selected = 'R_25';
@@ -330,6 +331,7 @@ class _DashboardState extends State<Dashboard> {
 
     final generation = ++connectionGeneration;
     connecting = true;
+    socketReady = false;
 
     _log('SOCKET', 'Connecting to Deriv WebSocket');
     setState(() => status = 'CONNECTING');
@@ -356,6 +358,7 @@ class _DashboardState extends State<Dashboard> {
         return;
       }
 
+      socketReady = true;
       _log('SOCKET', 'Connected');
       subscription = ws.stream.listen(
         _message,
@@ -410,6 +413,7 @@ class _DashboardState extends State<Dashboard> {
       if (generation != connectionGeneration) return;
 
       connecting = false;
+      socketReady = false;
       _addAlert('Connection failed: $error');
 
       if (mounted) {
@@ -432,6 +436,7 @@ class _DashboardState extends State<Dashboard> {
     } catch (_) {}
 
     channel = null;
+    socketReady = false;
     connecting = false;
 
     setState(() {
@@ -464,13 +469,21 @@ class _DashboardState extends State<Dashboard> {
 
   void _authorize(String token) {
     final clean = token.trim();
-    if (clean.isEmpty) { _log('AUTH', 'Empty token'); return; }
+    if (clean.isEmpty) { _log('AUTH', 'Empty token'); setState(() => accountStatus = 'TOKEN REQUIRED'); return; }
     authToken = clean;
     accountStatus = 'AUTHORIZING';
     _log('AUTH', 'Authorization requested; secret masked');
-    if (channel != null) {
-      channel!.sink.add(jsonEncode({'authorize': clean, 'req_id': 9001}));
-    } else { _connect(); }
+    if (socketReady && channel != null) {
+      try {
+        channel!.sink.add(jsonEncode({'authorize': clean, 'req_id': 9001}));
+      } catch (error) {
+        _log('AUTH', 'Send failed: $error');
+        _reconnect();
+      }
+    } else {
+      _log('AUTH', 'Waiting for socket before sending authorization');
+      if (!connecting) { reconnect?.cancel(); _connect(); }
+    }
     setState(() {});
   }
 
@@ -525,15 +538,23 @@ class _DashboardState extends State<Dashboard> {
           unsupportedSymbols.add(symbol);
         }
 
-        _log('DERIV ERROR', message);
+        final code = error is Map ? error['code']?.toString() ?? 'unknown' : 'unknown';
+        _log('DERIV ERROR', '$code: $message');
         if (j['echo_req'] is Map && (j['echo_req'] as Map).containsKey('authorize')) {
           accountStatus = 'AUTH FAILED';
           authToken = '';
+          _log('AUTH', 'Authorization rejected; re-enter a valid demo token');
         }
         _addAlert('Deriv: $message');
 
         if (mounted) {
-          setState(() => status = 'FEED ERROR');
+          setState(() {
+            if (echo is Map && echo.containsKey('authorize')) {
+              accountStatus = 'AUTH FAILED';
+            } else if (symbol != null) {
+              status = 'FEED ERROR';
+            }
+          });
         }
         return;
       }
@@ -743,7 +764,6 @@ class _DashboardState extends State<Dashboard> {
     tokenController.dispose();
     barrierController.dispose();
     stakeController.dispose();
-    tokenController.dispose();
     clock?.cancel();
     reconnect?.cancel();
     heartbeat?.cancel();
