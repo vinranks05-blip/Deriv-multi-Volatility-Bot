@@ -324,104 +324,161 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  Future<void> _connect() async {
-    if (!mounted || connecting) return;
+  
+Future<void> _connect() async {
+  if (!mounted || connecting) return;
 
-    reconnect?.cancel();
+  reconnect?.cancel();
+  heartbeat?.cancel();
 
-    final generation = ++connectionGeneration;
-    connecting = true;
-    socketReady = false;
+  final generation = ++connectionGeneration;
+  connecting = true;
+  socketReady = false;
 
-    _log('SOCKET', 'Connecting to Deriv WebSocket');
-    setState(() => status = 'CONNECTING');
+  setState(() => status = 'CONNECTING');
+
+  await subscription?.cancel();
+  subscription = null;
+
+  try {
+    await channel?.sink.close();
+  } catch (_) {}
+
+  channel = null;
+
+  const endpoints = [
+    'wss://ws.derivws.com/websockets/v3?app_id=1089',
+    'wss://ws.binaryws.com/websockets/v3?app_id=1089',
+  ];
+
+  WebSocketChannel? connectedSocket;
+
+  for (final endpoint in endpoints) {
+    if (!mounted || generation != connectionGeneration) {
+      connecting = false;
+      return;
+    }
+
+    WebSocketChannel? candidate;
 
     try {
-      await subscription?.cancel();
+      _log('SOCKET', 'Trying $endpoint');
 
-      try {
-        await channel?.sink.close();
-      } catch (_) {}
-
-      final ws = WebSocketChannel.connect(
-        Uri.parse(
-          'wss://ws.derivws.com/websockets/v3?app_id=1089',
-        ),
+      candidate = WebSocketChannel.connect(
+        Uri.parse(endpoint),
       );
 
-      channel = ws;
-
-      await ws.ready.timeout(const Duration(seconds: 15));
+      await candidate.ready.timeout(
+        const Duration(seconds: 12),
+      );
 
       if (!mounted || generation != connectionGeneration) {
-        await ws.sink.close();
+        await candidate.sink.close();
+        connecting = false;
         return;
       }
 
-      socketReady = true;
-      _log('SOCKET', 'Connected');
-      subscription = ws.stream.listen(
-        _message,
-        onError: (Object error) {
-          if (generation == connectionGeneration) {
-            _addAlert('Connection error: $error');
-            _reconnect();
-          }
-        },
-        onDone: () {
-          if (generation == connectionGeneration) {
-            _reconnect();
-          }
-        },
-        cancelOnError: true,
-      );
-
-      connecting = false;
-      lastMessage = DateTime.now();
-
-      setState(() => status = 'SUBSCRIBING');
-      if (authToken.isNotEmpty) {
-        ws.sink.add(jsonEncode({'authorize': authToken, 'req_id': 9001}));
-        _log('AUTH', 'Authorization requested; secret masked');
-      }
-
-      for (final m in markets) {
-        if (!unsupportedSymbols.contains(m.symbol)) {
-          _log('FEED', 'Subscribe ${m.symbol}');
-          ws.sink.add(
-            jsonEncode({
-              'ticks': m.symbol,
-              'subscribe': 1,
-            }),
-          );
-        }
-      }
-
-      heartbeat?.cancel();
-      heartbeat = Timer.periodic(
-        const Duration(seconds: 25),
-        (_) {
-          if (generation != connectionGeneration) return;
-          try {
-            ws.sink.add(jsonEncode({'ping': 1}));
-          } catch (_) {
-            _reconnect();
-          }
-        },
-      );
+      connectedSocket = candidate;
+      _log('SOCKET', 'Handshake successful: $endpoint');
+      break;
     } catch (error) {
-      if (generation != connectionGeneration) return;
-
-      connecting = false;
-      socketReady = false;
+      _log('SOCKET ERROR', '$endpoint: $error');
       _addAlert('Connection failed: $error');
 
-      if (mounted) {
-        setState(() => status = 'CONNECTION FAILED');
-        _reconnect();
-      }
+      try {
+        await candidate?.sink.close();
+      } catch (_) {}
     }
   }
+
+  if (!mounted || generation != connectionGeneration) {
+    connecting = false;
+    await connectedSocket?.sink.close();
+    return;
+  }
+
+  if (connectedSocket == null) {
+    connecting = false;
+    socketReady = false;
+
+    setState(() => status = 'CONNECTION FAILED');
+    _log('SOCKET', 'All configured endpoints failed');
+    _reconnect();
+    return;
+  }
+
+  final ws = connectedSocket;
+  channel = ws;
+  socketReady = true;
+  connecting = false;
+  lastMessage = DateTime.now();
+
+  subscription = ws.stream.listen(
+    _message,
+    onError: (Object error) {
+      if (generation != connectionGeneration) return;
+
+      _log('SOCKET ERROR', error.toString());
+      _addAlert('Connection error: $error');
+      _reconnect();
+    },
+    onDone: () {
+      if (generation != connectionGeneration) return;
+
+      _log('SOCKET', 'Connection closed by server');
+      _reconnect();
+    },
+    cancelOnError: true,
+  );
+
+  setState(() => status = 'SUBSCRIBING');
+
+  try {
+    if (authToken.isNotEmpty) {
+      ws.sink.add(jsonEncode({
+        'authorize': authToken,
+        'req_id': 9001,
+      }));
+
+      _log('AUTH', 'Demo authorization requested');
+    }
+
+    for (final market in markets) {
+      if (unsupportedSymbols.contains(market.symbol)) {
+        continue;
+      }
+
+      ws.sink.add(jsonEncode({
+        'ticks': market.symbol,
+        'subscribe': 1,
+      }));
+
+      _log('FEED', 'Subscribed to ${market.symbol}');
+    }
+
+    heartbeat = Timer.periodic(
+      const Duration(seconds: 25),
+      (_) {
+        if (!mounted ||
+            generation != connectionGeneration ||
+            !socketReady) {
+          return;
+        }
+
+        try {
+          ws.sink.add(jsonEncode({'ping': 1}));
+        } catch (error) {
+          _log('HEARTBEAT', error.toString());
+          _reconnect();
+        }
+      },
+    );
+  } catch (error) {
+    _log('SOCKET ERROR', 'Subscription failed: $error');
+    _reconnect();
+  }
+}
+
 
   void _reconnect() {
     if (!mounted || reconnect?.isActive == true) return;
