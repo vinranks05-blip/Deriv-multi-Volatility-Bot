@@ -158,6 +158,98 @@ class _DashboardState extends State<Dashboard> {
   final diagnosticLogs = <String>[];
   DateTime? lastTick;
   int tickCount = 0;
+  // Demo-only broker order state. Never auto-purchase or submit on real accounts.
+  int orderSequence = 20000;
+  int tradesPlaced = 0;
+  int consecutiveLosses = 0;
+  double sessionProfit = 0;
+  bool orderPending = false;
+  int? openContractId;
+  String orderState = 'IDLE';
+  final List<String> orderHistory = [];
+  String orderType = 'DIGITMATCH';
+  final TextEditingController barrierController = TextEditingController(text: '5');
+  final TextEditingController stakeController = TextEditingController(text: '0.35');
+  String currency = 'USD';
+  bool get demoAuthorized => accountStatus == 'DEMO AUTHENTICATED';
+  bool get canOrder => demoAuthorized && !orderPending && openContractId == null &&
+      tradesPlaced < 6 && consecutiveLosses < 2 && sessionProfit > -1.0 && sessionProfit < 1.0;
+  void _sendOrderRequest(Map<String, dynamic> request) {
+    final socket = channel;
+    if (socket == null) { _log('ORDER', 'No WebSocket connection'); return; }
+    socket.sink.add(jsonEncode(request));
+  }
+  void _requestProposal() {
+    if (!canOrder) { _log('ORDER', 'Blocked: demo auth, limits, or open order'); return; }
+    final stake = double.tryParse(stakeController.text);
+    final barrier = int.tryParse(barrierController.text);
+    if (stake == null || stake < 0.35 || stake > 10 || barrier == null || barrier < 0 || barrier > 9) {
+      _log('ORDER', 'Invalid stake or barrier'); return;
+    }
+    final market = markets.firstWhere((m) => m.symbol == selected);
+    if (!market.live) { _log('ORDER', 'Selected market feed is not live'); return; }
+    setState(() { orderPending = true; orderState = 'REQUESTING PROPOSAL'; });
+    _sendOrderRequest({'proposal': 1, 'amount': stake, 'basis': 'stake',
+      'contract_type': orderType, 'currency': currency, 'duration': 10,
+      'duration_unit': 't', 'symbol': selected,
+      if (!['DIGITEVEN', 'DIGITODD'].contains(orderType)) 'barrier': barrier.toString(),
+      'req_id': ++orderSequence});
+    _log('ORDER', 'Requested proposal $orderType $selected; no purchase yet');
+  }
+  Future<void> _confirmPurchase(String proposalId, double askPrice) async {
+    if (!mounted || !demoAuthorized || !orderPending) return;
+    final approved = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+      title: const Text('Confirm DEMO purchase'),
+      content: Text('$orderType on $selected\nPrice: $askPrice $currency\n'
+        'This submits a real broker order on your DEMO account.'),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('BUY DEMO'))]));
+    if (!mounted) return;
+    if (approved != true || !demoAuthorized) {
+      setState(() { orderPending = false; orderState = 'CANCELLED'; }); return;
+    }
+    _sendOrderRequest({'buy': proposalId, 'price': askPrice, 'req_id': ++orderSequence});
+    setState(() => orderState = 'PURCHASE SENT');
+    _log('ORDER', 'Purchase submitted; awaiting broker confirmation');
+  }
+  void _orderMessage(Map<String, dynamic> j) {
+    final type = j['msg_type'];
+    if (type == 'proposal' && j['proposal'] is Map && orderPending) {
+      final proposal = j['proposal'] as Map;
+      final id = proposal['id']?.toString();
+      final price = (proposal['ask_price'] as num?)?.toDouble();
+      if (id != null && price != null) { _confirmPurchase(id, price); }
+      else { setState(() { orderPending = false; orderState = 'INVALID PROPOSAL'; }); }
+      return;
+    }
+    if (type == 'buy' && j['buy'] is Map) {
+      final buy = j['buy'] as Map;
+      final id = (buy['contract_id'] as num?)?.toInt();
+      if (id == null) { _log('ORDER', 'Missing contract ID'); return; }
+      setState(() { openContractId = id; orderPending = false; tradesPlaced++; orderState = 'OPEN #$id'; });
+      orderHistory.insert(0, 'OPEN #$id • $orderType • $selected');
+      _log('ORDER', 'Broker confirmed purchase #$id');
+      _sendOrderRequest({'proposal_open_contract': 1, 'contract_id': id, 'subscribe': 1});
+      return;
+    }
+    if (type == 'proposal_open_contract' && j['proposal_open_contract'] is Map) {
+      final contract = j['proposal_open_contract'] as Map;
+      final id = (contract['contract_id'] as num?)?.toInt();
+      if (id == null || id != openContractId) return;
+      if (contract['is_sold'] == 1) {
+        final profit = (contract['profit'] as num?)?.toDouble();
+        if (profit == null) { _log('ORDER', 'Sold but no verified profit returned'); return; }
+        setState(() {
+          sessionProfit += profit;
+          consecutiveLosses = profit < 0 ? consecutiveLosses + 1 : 0;
+          orderState = 'SETTLED #$id'; openContractId = null;
+          orderHistory.insert(0, 'SETTLED #$id • P/L ${profit.toStringAsFixed(2)} $currency');
+        });
+        _log('ORDER', 'Settled #$id; broker P/L $profit $currency');
+      }
+    }
+  }
+
 
   DateTime? lastMessage;
 
@@ -401,7 +493,8 @@ class _DashboardState extends State<Dashboard> {
       if (j['msg_type'] == 'authorize' && j['authorize'] is Map) {
         final a = j['authorize'] as Map;
         accountId = a['loginid']?.toString() ?? '';
-        accountStatus = a['is_virtual'] == 1 ? 'DEMO AUTHENTICATED' : 'REAL ACCOUNT - READ ONLY';
+        currency = a['currency']?.toString() ?? 'USD';
+        accountStatus = (a['is_virtual'] == 1 || a['is_virtual'] == true) ? 'DEMO AUTHENTICATED' : 'REAL ACCOUNT - READ ONLY';
         _log('AUTH', 'Authorized account $accountId');
         channel?.sink.add(jsonEncode({'balance': 1, 'subscribe': 1}));
         setState(() {});
@@ -414,6 +507,9 @@ class _DashboardState extends State<Dashboard> {
         return;
       }
       if (j['error'] != null) {
+        if (['proposal', 'buy'].contains(j['msg_type']) || (j['echo_req'] is Map && ((j['echo_req'] as Map).containsKey('proposal') || (j['echo_req'] as Map).containsKey('buy')))) {
+          orderPending = false; orderState = 'ORDER ERROR';
+        }
         final error = j['error'];
         final message = error is Map
             ? (error['message']?.toString() ?? 'API error')
@@ -442,6 +538,7 @@ class _DashboardState extends State<Dashboard> {
         return;
       }
 
+      if (['proposal', 'buy', 'proposal_open_contract'].contains(j['msg_type'])) { _orderMessage(j); return; }
       if (j['msg_type'] != 'tick') return;
 
       final t = j['tick'];
@@ -643,6 +740,9 @@ class _DashboardState extends State<Dashboard> {
 
   @override
   void dispose() {
+    tokenController.dispose();
+    barrierController.dispose();
+    stakeController.dispose();
     tokenController.dispose();
     clock?.cancel();
     reconnect?.cancel();
@@ -1072,43 +1172,39 @@ class _DashboardState extends State<Dashboard> {
     );
   }
 
-  Widget _trades() => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Trades',
-            style: TextStyle(
-              fontSize: 25,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          _card(
-            const Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'BROKER EXECUTION DISABLED',
-                  style: TextStyle(
-                    color: Colors.amber,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                SizedBox(height: 8),
-                Text(
-                  'This build receives public market ticks. '
-                  'It does not authenticate an account or submit broker orders. '
-                  'No trade or profit is fabricated.',
-                ),
-                SizedBox(height: 8),
-                Text(
-                  'Demo order execution requires a separate authenticated '
-                  'integration and contract confirmation.',
-                ),
-              ],
-            ),
-          ),
-        ],
-      );
+  Widget _trades() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    const Text('Demo Orders', style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
+    _card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('Account: $accountStatus'), Text('Order: $orderState'),
+      Text('Session P/L: ${sessionProfit.toStringAsFixed(2)} $currency'),
+      Text('Trades: $tradesPlaced/6 • Consecutive losses: $consecutiveLosses/2'),
+      if (!demoAuthorized) const Text('DEMO authorization required. Real accounts are read-only.',
+        style: TextStyle(color: Colors.amber)),
+      DropdownButton<String>(isExpanded: true, value: selected,
+        items: markets.map((m) => DropdownMenuItem(value: m.symbol, child: Text(m.name))).toList(),
+        onChanged: openContractId == null ? (v) { if (v != null) setState(() => selected = v); } : null),
+      DropdownButton<String>(isExpanded: true, value: orderType,
+        items: const [
+          DropdownMenuItem(value: 'DIGITMATCH', child: Text('Matches')),
+          DropdownMenuItem(value: 'DIGITDIFF', child: Text('Differs')),
+          DropdownMenuItem(value: 'DIGITEVEN', child: Text('Even')),
+          DropdownMenuItem(value: 'DIGITODD', child: Text('Odd')),
+          DropdownMenuItem(value: 'DIGITOVER', child: Text('Over')),
+          DropdownMenuItem(value: 'DIGITUNDER', child: Text('Under')),
+        ], onChanged: (v) { if (v != null) setState(() => orderType = v); }),
+      TextField(controller: barrierController, keyboardType: TextInputType.number,
+        decoration: const InputDecoration(labelText: 'Barrier digit (0–9; when applicable)')),
+      TextField(controller: stakeController, keyboardType: const TextInputType.numberWithOptions(decimal: true),
+        decoration: const InputDecoration(labelText: 'Stake (USD; minimum 0.35)')),
+      const SizedBox(height: 10),
+      FilledButton(onPressed: canOrder ? _requestProposal : null,
+        child: const Text('GET PROPOSAL → CONFIRM DEMO BUY')),
+      const Text('10 ticks duration. Broker may reject unsupported contracts. '
+        'No automated purchases; purchase requires confirmation.',
+        style: TextStyle(fontSize: 11, color: Colors.white60)),
+    ])),
+    ...orderHistory.take(30).map((x) => _card(Text(x))),
+  ]);
 
   Widget _history() => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
