@@ -22,11 +22,11 @@ class V13App extends StatelessWidget {
 }
 
 class Forecast {
-  final int digit, sourceEpoch, strategy;
+  final int digit, sourceEpoch, strategy, sourceCount;
   final DateTime issued;
   final double estimate;
   final String method;
-  const Forecast(this.digit, this.sourceEpoch, this.strategy, this.issued, this.estimate, this.method);
+  const Forecast(this.digit, this.sourceEpoch, this.sourceCount, this.strategy, this.issued, this.estimate, this.method);
 }
 class Result {
   final String symbol, mode;
@@ -201,12 +201,16 @@ class _DashboardState extends State<Dashboard> {
     }
     var chosen=0;
     for(var k=1;k<3;k++) { if(wins[k]>wins[chosen]) chosen=k; }
+    final trainingCounts=List<int>.filled(10,0);
+    for(final t in train) { trainingCounts[t.lastDigit]++; }
+    var baselineDigit=0;
+    for(var d=1;d<10;d++) { if(trainingCounts[d]>trainingCounts[baselineDigit]) baselineDigit=d; }
     var right=0, baseline=0, tested=0;
     for(var i=cut;i<xs.length-1;i++) {
       final h=xs.sublist(max(0,i-199),i+1);
       final actual=xs[i+1].lastDigit;
       if(_best(_scores(h,chosen))==actual) right++;
-      if(actual==0) baseline++;
+      if(actual==baselineDigit) baseline++;
       tested++;
     }
     m.method=['Frequency','Recent 50','Transition blend'][chosen];
@@ -220,7 +224,7 @@ class _DashboardState extends State<Dashboard> {
     final method=['Frequency','Recent 50','Transition blend'].indexOf(m.method);
     final p=_scores(m.ticks.skip(max(0,m.ticks.length-200)).toList(),max(0,method));
     final digit=_best(p);
-    m.forecast=Forecast(digit,m.ticks.last.epoch,strategy,DateTime.now(),p[digit]*100,m.method);
+    m.forecast=Forecast(digit,m.ticks.last.epoch,m.ticks.length,strategy,DateTime.now(),p[digit]*100,m.method);
   }
   void _scan() {
     for(final m in markets) { _predict(m); }
@@ -228,7 +232,7 @@ class _DashboardState extends State<Dashboard> {
   }
   void _settle(Market m,V13Tick tick) {
     final f=m.forecast;
-    if(f==null || tick.epoch<=f.sourceEpoch) return;
+    if(f==null || m.ticks.length<=f.sourceCount) return;
     // A genuine NEXT-TICK forecast: score the first subsequent live tick.
     final actual=tick.lastDigit;
     final correct=switch(f.strategy) {
@@ -292,9 +296,9 @@ class _DashboardState extends State<Dashboard> {
       _card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Digit Distribution',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),
         for(var d=0;d<10;d++) Padding(padding:const EdgeInsets.symmetric(vertical:4),child:Row(children:[SizedBox(width:24,child:Text('$d')),Expanded(child:LinearProgressIndicator(value:m.ticks.isEmpty?0:counts[d]/m.ticks.length,minHeight:8,color:cyan)),const SizedBox(width:10),Text(m.ticks.isEmpty?'—':'${(counts[d]*100/m.ticks.length).toStringAsFixed(1)}%')]))])),
       _card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Prediction / Validation',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),
-        Text('Next digit: ${m.forecast?.digit??'—'}'),Text('Model: ${m.method}'),
+        Text('Next tick digit: ${m.forecast?.digit??'—'}'),Text('Model: ${m.method}'),Text('Estimate (uncalibrated): ${m.forecast==null?'—':'${m.forecast!.estimate.toStringAsFixed(1)}%'}'),
         Text('Holdout accuracy: ${m.testCount==0?'—':'${m.holdout.toStringAsFixed(1)}%'}'),
-        Text('Fixed-digit baseline: ${m.testCount==0?'—':'${m.baseline.toStringAsFixed(1)}%'}'),
+        Text('Training-majority baseline: ${m.testCount==0?'—':'${m.baseline.toStringAsFixed(1)}%'}'),
         Text('Unseen tests: ${m.testCount}'),Text('Forward Matches: ${_rate(_filtered(symbol:m.symbol,mode:'Matches'))}'),
         const Text('Holdout is historical; live forward accuracy is the stronger measure.',style:TextStyle(fontSize:11,color:Colors.white60))])),
       FilledButton(onPressed:(){_predict(m);setState((){});},child:const Text('PREDICT NEXT TICK'))
@@ -304,7 +308,7 @@ class _DashboardState extends State<Dashboard> {
     _card(const Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('PUBLIC DATA ONLY',style:TextStyle(color:Colors.amber,fontWeight:FontWeight.bold)),SizedBox(height:8),
       Text('Broker orders are locked. The public market-data socket cannot authenticate a demo account or place trades.'),SizedBox(height:8),
       Text('A separate PAT/OAuth → account ID → OTP → authenticated DEMO WebSocket flow is required before enabling purchase.'),SizedBox(height:8),
-      Text('Planned risk limits: $0.35 stake • 6 trades • 2 consecutive losses • session P/L −$1 to +$1 • daily loss $2.'),SizedBox(height:8),
+      Text('Planned risk limits: \$0.35 stake • 6 trades • 2 consecutive losses • session P/L −\$1 to +\$1 • daily loss \$2.'),SizedBox(height:8),
       Text('No real-money trading or automatic purchases.',style:TextStyle(color:Colors.white70))]))]);
   Widget _history() => Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Observation History',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),
     ...results.take(100).map((r)=>_card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('${r.symbol} • ${r.mode} • ${r.correct?'CORRECT':'INCORRECT'}',style:TextStyle(color:r.correct?green:red,fontWeight:FontWeight.bold)),Text('${r.predicted} → ${r.actual} • ${r.epoch}')])))]);
@@ -330,7 +334,7 @@ class _DashboardState extends State<Dashboard> {
     final pages=[_radar,_analyzer,_trades,_history,_journal,_alerts,_settings,_diagnostics];
     const names=['Radar','Analyzer','Trades','History','Journal','Alerts','Settings','Logs'];
     const icons=[Icons.radar,Icons.bar_chart,Icons.swap_horiz,Icons.history,Icons.article_outlined,Icons.notifications_outlined,Icons.settings_outlined,Icons.terminal];
-    return Scaffold(appBar:AppBar(backgroundColor:panel,title:const Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('V13 Expert Trader PRO',style:TextStyle(fontSize:19,fontWeight:FontWeight.bold)),Text('Deriv • Experimental market scanner',style:TextStyle(fontSize:11,color:Colors.white70))]),actions:[Padding(padding:const EdgeInsets.only(right:10),child:Center(child:_pill('PUBLIC DATA',color:green)))]),
+    return Scaffold(appBar:AppBar(backgroundColor:panel,title:const Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('V13.1 Expert Trader PRO',style:TextStyle(fontSize:19,fontWeight:FontWeight.bold)),Text('Deriv • Experimental market scanner',style:TextStyle(fontSize:11,color:Colors.white70))]),actions:[Padding(padding:const EdgeInsets.only(right:10),child:Center(child:_pill('PUBLIC DATA',color:green)))]),
       body:SafeArea(child:Column(children:[Expanded(child:ListView(padding:const EdgeInsets.all(14),children:[pages[tab]()])),
         Container(height:69,color:panel,child:ListView.builder(scrollDirection:Axis.horizontal,itemCount:names.length,itemBuilder:(context,i)=>InkWell(onTap:()=>setState(()=>tab=i),child:Container(width:max(66.0,MediaQuery.sizeOf(context).width/6.2),padding:const EdgeInsets.symmetric(vertical:7),decoration:BoxDecoration(color:tab==i?blue.withOpacity(.2):Colors.transparent,borderRadius:BorderRadius.circular(12)),child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[Icon(icons[i],size:22,color:tab==i?cyan:Colors.white70),const SizedBox(height:3),Text(names[i],style:TextStyle(fontSize:10,color:tab==i?cyan:Colors.white70))])))))])));
   }

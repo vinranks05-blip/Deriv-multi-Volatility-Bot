@@ -34,6 +34,7 @@ class V13MarketData {
   bool _disposed = false;
   int _attempt = 0;
   int _generation = 0;
+  bool _connecting = false;
   bool connected = false;
 
   Stream<V13Tick> get ticks => _ticks.stream;
@@ -42,7 +43,8 @@ class V13MarketData {
   Stream<String> get errors => _errors.stream;
 
   Future<void> connect() async {
-    if (_disposed) return;
+    if (_disposed || _connecting) return;
+    _connecting = true;
     _retry?.cancel();
     final generation = ++_generation;
     await _socketSubscription?.cancel();
@@ -55,9 +57,11 @@ class V13MarketData {
       await channel.ready.timeout(const Duration(seconds: 15));
       if (_disposed || generation != _generation) {
         await channel.sink.close();
+        _connecting = false;
         return;
       }
       connected = true;
+      _connecting = false;
       _attempt = 0;
       _socketSubscription = channel.stream.listen(_handle,
           onError: (Object error) => _disconnected(generation, '$error'),
@@ -69,6 +73,7 @@ class V13MarketData {
       }
       _heartbeat = Timer.periodic(const Duration(seconds: 25), (_) => _send({'ping': 1}));
     } catch (e) {
+      _connecting = false;
       _disconnected(generation, '$e');
     }
   }
@@ -172,6 +177,7 @@ class V13MarketData {
   void _disconnected(int generation, String reason) {
     if (_disposed || generation != _generation) return;
     connected = false;
+    _connecting = false;
     _heartbeat?.cancel();
     _errors.add(reason);
     _retry?.cancel();
