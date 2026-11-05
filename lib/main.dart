@@ -56,6 +56,14 @@ class Market {
   double agreement = 0;
   double nextDigitEstimate = 0;
   String predictionMethod = 'WAITING';
+  double validatedAccuracy = 0;
+  int validationSamples = 0;
+  double baselineAccuracy = 0;
+  bool signalQualified = false;
+  double mlAccuracy = 0;
+  double mlBaseline = 0;
+  int mlTestCount = 0;
+  List<double> mlProbabilities = List<double>.filled(10, 0.1);
   double? rsi;
   double? macd;
   double? atr;
@@ -693,42 +701,186 @@ Future<void> _connect() async {
         .toDouble();
   }
 
-  // V12.2: One-step-ahead digit forecast. Uses only past ticks.
-  // A smoothed first-order transition model is blended with marginal
-  // digit frequencies; it is not trained on the future settlement tick.
-  // This is an experimental forecast, NOT a calibrated win probability.
-  List<double> _nextDigitScores(Market m) {
-    final history = m.ticks;
-    final global = List<double>.filled(10, 1.0); // Laplace smoothing
-    final conditional = List<double>.filled(10, 1.0);
+  // V12.3: Walk-forward digit analysis. Each historical forecast uses ONLY
+  // ticks preceding its forecast timestamp. Evaluation targets the first
+  // observed tick at least 10 seconds later, matching live settlement.
+  // This is an observational experiment, not a guaranteed trading signal.
+  List<double> _digitScores(List<TickPoint> history, int method) {
+    final frequency = List<double>.filled(10, 1.0);
+    final transition = List<double>.filled(10, 1.0);
+    final recent = List<double>.filled(10, 1.0);
     if (history.isEmpty) return List<double>.filled(10, 0.1);
     final previous = history.last.digit;
     for (var i = 0; i < history.length; i++) {
-      global[history[i].digit]++;
-      if (i > 0 && history[i - 1].digit == previous) {
-        conditional[history[i].digit]++;
-      }
+      final digit = history[i].digit;
+      frequency[digit]++;
+      if (i >= history.length - 50) recent[digit]++;
+      if (i > 0 && history[i - 1].digit == previous) transition[digit]++;
     }
-    final globalSum = global.reduce((a, b) => a + b);
-    final conditionalSum = conditional.reduce((a, b) => a + b);
-    // Shrink conditional estimates toward the unconditional distribution.
-    final transitions = conditionalSum - 10;
+    List<double> normalize(List<double> counts) {
+      final total = counts.reduce((a, b) => a + b);
+      return counts.map((v) => v / total).toList();
+    }
+    final global = normalize(frequency);
+    final local = normalize(recent);
+    final conditional = normalize(transition);
+    if (method == 0) return global;
+    if (method == 1) return local;
+    final transitions = transition.reduce((a, b) => a + b) - 10;
     final weight = transitions / (transitions + 50.0);
     return List.generate(10, (d) =>
-      weight * conditional[d] / conditionalSum +
-      (1 - weight) * global[d] / globalSum);
+      weight * conditional[d] + (1 - weight) * global[d]);
+  }
+
+  int _bestDigit(List<double> scores) {
+    var best = 0;
+    for (var d = 1; d < 10; d++) {
+      if (scores[d] > scores[best]) best = d;
+    }
+    return best;
+  }
+
+  // Lightweight on-device multiclass logistic regression (softmax).
+  // The label is the first tick at least 10 seconds after the feature tick.
+  // Train on older observations, evaluate on the newest chronological 30%.
+  // No future digit is used as a feature, and no external ML package is needed.
+  List<double> _mlFeatures(List<TickPoint> ticks, int i) {
+    final x = List<double>.filled(31, 0);
+    x[0] = 1;
+    x[1 + ticks[i].digit] = 1;
+    x[11 + ticks[i - 1].digit] = 1;
+    final start = max(0, i - 49);
+    for (var j = start; j <= i; j++) {
+      x[21 + ticks[j].digit] += 1 / (i - start + 1);
+    }
+    return x;
+  }
+
+  List<double> _softmax(List<double> logits) {
+    final largest = logits.reduce(max);
+    final expValues = logits.map((v) => exp(v - largest)).toList();
+    final total = expValues.reduce((a, b) => a + b);
+    return expValues.map((v) => v / total).toList();
+  }
+
+  List<double> _mlPredict(List<List<double>> weights, List<double> x) {
+    return _softmax(List.generate(10, (d) {
+      var v = 0.0;
+      for (var f = 0; f < x.length; f++) { v += weights[d][f] * x[f]; }
+      return v;
+    }));
+  }
+
+  void _evaluateML(Market m) {
+    final ticks = m.ticks;
+    if (ticks.length < 160) {
+      m.mlTestCount = 0;
+      m.mlAccuracy = 0;
+      m.mlProbabilities = List<double>.filled(10, 0.1);
+      return;
+    }
+    final examples = <(List<double>, int)>[];
+    for (var i = 50; i < ticks.length - 1; i++) {
+      final deadline = ticks[i].epoch + 10;
+      var target = i + 1;
+      while (target < ticks.length && ticks[target].epoch < deadline) { target++; }
+      if (target >= ticks.length) break;
+      examples.add((_mlFeatures(ticks, i), ticks[target].digit));
+    }
+    if (examples.length < 80) return;
+    final split = (examples.length * 0.7).floor();
+    final weights = List.generate(10, (_) => List<double>.filled(31, 0));
+    // Train only on the first 70%; deterministic, regularized SGD.
+    for (var epoch = 0; epoch < 8; epoch++) {
+      for (var i = 0; i < split; i++) {
+        final x = examples[i].$1;
+        final label = examples[i].$2;
+        final probabilities = _mlPredict(weights, x);
+        const learningRate = 0.035;
+        for (var d = 0; d < 10; d++) {
+          final error = (d == label ? 1.0 : 0.0) - probabilities[d];
+          for (var f = 0; f < x.length; f++) {
+            weights[d][f] += learningRate * (error * x[f] - 0.001 * weights[d][f]);
+          }
+        }
+      }
+    }
+    var correct = 0;
+    var baseline = 0;
+    for (var i = split; i < examples.length; i++) {
+      final actual = examples[i].$2;
+      if (_bestDigit(_mlPredict(weights, examples[i].$1)) == actual) correct++;
+      if (actual == 0) baseline++;
+    }
+    final count = examples.length - split;
+    m.mlTestCount = count;
+    m.mlAccuracy = 100 * correct / count;
+    m.mlBaseline = 100 * baseline / count;
+    m.mlProbabilities = _mlPredict(weights, _mlFeatures(ticks, ticks.length - 1));
+  }
+
+  // Compare three candidate models and a fixed-digit baseline on identical
+  // historical forecast points. Keep the most recent portion for evaluation.
+  // No future ticks enter the model's training window for a tested point.
+  void _evaluateMarket(Market m) {
+    final ticks = m.ticks;
+    final wins = List<int>.filled(4, 0);
+    var tested = 0;
+    if (ticks.length < 150) {
+      m.validationSamples = 0;
+      m.signalQualified = false;
+      return;
+    }
+    final start = max(100, ticks.length - 100);
+    for (var i = start; i < ticks.length - 1; i++) {
+      final deadline = ticks[i].epoch + 10;
+      var target = i + 1;
+      while (target < ticks.length && ticks[target].epoch < deadline) {
+        target++;
+      }
+      if (target >= ticks.length) break;
+      final history = ticks.sublist(max(0, i - 199), i + 1);
+      final actual = ticks[target].digit;
+      for (var method = 0; method < 3; method++) {
+        if (_bestDigit(_digitScores(history, method)) == actual) wins[method]++;
+      }
+      if (actual == 0) wins[3]++;
+      tested++;
+    }
+    m.validationSamples = tested;
+    m.baselineAccuracy = tested == 0 ? 0 : wins[3] * 100 / tested;
+    var bestMethod = 0;
+    for (var method = 1; method < 3; method++) {
+      if (wins[method] > wins[bestMethod]) bestMethod = method;
+    }
+    m.validatedAccuracy = tested == 0 ? 0 : wins[bestMethod] * 100 / tested;
+    m.predictionMethod = ['Frequency', 'Recent 50', 'Transition blend'][bestMethod];
+    // A cautious filter: no claimed edge on a tiny sample or when the model
+    // fails to outperform both chance and the fixed-digit baseline.
+    m.signalQualified = tested >= 60 &&
+        m.validatedAccuracy >= 14 &&
+        m.validatedAccuracy >= m.baselineAccuracy + 3;
   }
 
   void _predict(Market m) {
     if (!m.live || m.ticks.length < 100 || m.prediction != null) return;
-    final scores = _nextDigitScores(m);
-    var best = 0;
-    for (var i = 1; i < 10; i++) {
-      if (scores[i] > scores[best]) best = i;
+    _evaluateMarket(m);
+    _evaluateML(m);
+    final method = switch (m.predictionMethod) {
+      'Recent 50' => 1,
+      'Transition blend' => 2,
+      _ => 0,
+    };
+    final scores = m.mlTestCount >= 25 &&
+        m.mlAccuracy >= 14 && m.mlAccuracy >= m.mlBaseline + 3
+        ? m.mlProbabilities : _digitScores(m.ticks, method);
+    if (identical(scores, m.mlProbabilities)) {
+      m.predictionMethod = "ML softmax (experimental)";
+      m.signalQualified = true;
     }
+    final best = _bestDigit(scores);
     m.prediction = best;
     m.nextDigitEstimate = scores[best] * 100;
-    m.predictionMethod = 'Transition + frequency';
     m.predictedEpoch = m.ticks.last.epoch;
     m.predictionStrategy = strategy;
     m.predictionDeadline = DateTime.now().add(const Duration(seconds: 10));
@@ -941,7 +1093,7 @@ Future<void> _connect() async {
                     Text(
                       n == null
                           ? 'COLLECTING'
-                          : 'Model estimate ${m.nextDigitEstimate.toStringAsFixed(1)}% (unvalidated)',
+                          : 'Model ${m.nextDigitEstimate.toStringAsFixed(1)}% (uncalibrated)',
                       style: const TextStyle(
                         color: Colors.amber,
                         fontWeight: FontWeight.bold,
@@ -1037,9 +1189,50 @@ Future<void> _connect() async {
               style: const TextStyle(fontSize: 12, color: cyan)),
           ]),
         )),
-        const Text('Transition + frequency forecast. The percentage is a model estimate, '
-          'not validated confidence; evaluation uses a future tick after the scan deadline.',
+        const Text('Experimental next-digit forecasts; model percentages are uncalibrated. '
+          'Walk-forward results are observational, not broker trade win rates.',
           style: TextStyle(color: Colors.white60, fontSize: 11)),
+        const SizedBox(height: 10),
+        const SizedBox(height: 12),
+        const Text('V12.4 ML Matches Analyzer',
+          style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 6),
+        ...markets.map((m) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('${m.name} • ${m.predictionMethod}',
+              style: const TextStyle(fontSize: 12)),
+            Text(m.validationSamples == 0
+              ? 'Collecting validation data'
+              : 'Backtest: ${m.validatedAccuracy.toStringAsFixed(1)}% '
+                '(${m.validationSamples} tests) • fixed-digit baseline '
+                '${m.baselineAccuracy.toStringAsFixed(1)}% • '
+                '${m.signalQualified ? "EXPERIMENTAL EDGE" : "NO RELIABLE SIGNAL"}',
+              style: TextStyle(fontSize: 11,
+                color: m.signalQualified ? green : Colors.amber)),
+          ]),
+        )),
+        const Text('Models are selected on the same rolling historical data used '
+          'to report their scores, so these results may be optimistic. '
+          'Forward live observations below are the stronger evidence. '
+          'An experimental edge is not a validated trading advantage.',
+          style: TextStyle(color: Colors.white60, fontSize: 11)),
+        const SizedBox(height: 10),
+        const SizedBox(height: 12),
+        const Text('ML Matches — chronological holdout',
+          style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 5),
+        ...markets.map((m) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Text('${m.name}: ML ${m.mlAccuracy.toStringAsFixed(1)}% '
+            'vs digit-0 baseline ${m.mlBaseline.toStringAsFixed(1)}% '
+            '(${m.mlTestCount} unseen tests)',
+            style: const TextStyle(fontSize: 11)),
+        )),
+        const Text('ML is trained on older ticks and tested on later ticks. '
+          'Scores are exploratory and may not generalize. '
+          'Predictions are observations, not trading advice.',
+          style: TextStyle(fontSize: 11, color: Colors.white60)),
         const SizedBox(height: 10),
         const Text('Success by market',
           style: TextStyle(fontWeight: FontWeight.bold)),
@@ -1621,7 +1814,7 @@ Future<void> _connect() async {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'V12.2 Expert Trader PRO',
+              'V12.4 Expert Trader PRO',
               style: TextStyle(
                 fontSize: 19,
                 fontWeight: FontWeight.bold,
