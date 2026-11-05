@@ -155,7 +155,8 @@ class V13MarketData {
           pipSizes[symbol] = pip;
           final item = V13Tick(symbol, p.toDouble(), t.toInt(), pip);
           final buffer = history.putIfAbsent(symbol, () => []);
-          if (buffer.isEmpty || buffer.last.epoch != item.epoch || buffer.last.price != item.price) {
+          if (buffer.isEmpty || (item.epoch >= buffer.last.epoch &&
+              (buffer.last.epoch != item.epoch || buffer.last.price != item.price))) {
             buffer.add(item);
             if (buffer.length > 5000) buffer.removeRange(0, buffer.length - 5000);
             _ticks.add(item);

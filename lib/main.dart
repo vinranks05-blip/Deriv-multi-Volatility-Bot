@@ -47,6 +47,11 @@ class Market {
   double? rsi, macd, movement;
   double holdout = 0, baseline = 0;
   int testCount = 0;
+  double mlHoldout = 0, mlBaseline = 0;
+  int mlTestCount = 0;
+  List<double> mlScores = List<double>.filled(10, 0.1);
+  bool mlSelected = false;
+  int lastEvaluationCount = 0;
   bool get live => lastSeen != null && DateTime.now().difference(lastSeen!).inSeconds < 15;
   int? get lastDigit => ticks.isEmpty ? null : ticks.last.lastDigit;
 }
@@ -186,6 +191,66 @@ class _DashboardState extends State<Dashboard> {
     for(var i=1;i<10;i++) { if(p[i]>p[best]) best=i; }
     return best;
   }
+  // V13.2: Train a small multiclass softmax model on older tick sequences.
+  // The newest 30% is strictly held out; all features precede their label.
+  List<double> _features(List<V13Tick> xs, int i) {
+    final x = List<double>.filled(31, 0);
+    x[0] = 1;
+    x[1 + xs[i].lastDigit] = 1;
+    x[11 + xs[i - 1].lastDigit] = 1;
+    final start = max(0, i - 49);
+    for (var j = start; j <= i; j++) {
+      x[21 + xs[j].lastDigit] += 1 / (i - start + 1);
+    }
+    return x;
+  }
+  List<double> _mlProb(List<List<double>> w, List<double> x) {
+    final z = List<double>.generate(10, (d) {
+      var sum = 0.0;
+      for (var k = 0; k < 31; k++) { sum += w[d][k] * x[k]; }
+      return sum;
+    });
+    final top = z.reduce(max);
+    final exps = z.map((v) => exp(v - top)).toList();
+    final total = exps.reduce((a, b) => a + b);
+    return exps.map((v) => v / total).toList();
+  }
+  void _trainML(Market m) {
+    final xs = m.ticks.length > 1200
+        ? m.ticks.sublist(m.ticks.length - 1200) : m.ticks;
+    if (xs.length < 250) { m.mlTestCount = 0; m.mlSelected = false; return; }
+    final cut = (xs.length * .7).floor();
+    final w = List.generate(10, (_) => List<double>.filled(31, 0));
+    // Train on older examples, stepping by two to limit mobile CPU usage.
+    for (var pass = 0; pass < 5; pass++) {
+      for (var i = 50; i < cut - 1; i += 2) {
+        final x = _features(xs, i);
+        final p = _mlProb(w, x);
+        final actual = xs[i + 1].lastDigit;
+        for (var d = 0; d < 10; d++) {
+          final delta = .035 * ((d == actual ? 1.0 : 0.0) - p[d]);
+          for (var k = 0; k < 31; k++) { w[d][k] += delta * x[k]; }
+        }
+      }
+    }
+    final counts = List<int>.filled(10, 0);
+    for (var i = 0; i < cut; i++) { counts[xs[i].lastDigit]++; }
+    var majority = 0;
+    for (var d = 1; d < 10; d++) {
+      if (counts[d] > counts[majority]) majority = d;
+    }
+    var right = 0, base = 0, n = 0;
+    for (var i = cut; i < xs.length - 1; i++) {
+      final actual = xs[i + 1].lastDigit;
+      if (_best(_mlProb(w, _features(xs, i))) == actual) right++;
+      if (actual == majority) base++;
+      n++;
+    }
+    m.mlTestCount = n;
+    m.mlHoldout = n == 0 ? 0 : 100 * right / n;
+    m.mlBaseline = n == 0 ? 0 : 100 * base / n;
+    m.mlScores = _mlProb(w, _features(xs, xs.length - 1));
+  }
   // Chronological holdout; choose a model only from training history.
   // The holdout remains untouched by model selection.
   void _evaluate(Market m) {
@@ -217,12 +282,19 @@ class _DashboardState extends State<Dashboard> {
     m.testCount=tested;
     m.holdout=tested==0?0:100*right/tested;
     m.baseline=tested==0?0:100*baseline/tested;
+    _trainML(m);
+    // Select ML only if it beats the statistical model and the baseline
+    // on chronological holdout. These are exploratory, not guaranteed odds.
+    m.mlSelected = m.mlTestCount >= 50 &&
+        m.mlHoldout > m.holdout + 2 && m.mlHoldout > m.mlBaseline + 2;
+    if (m.mlSelected) m.method = 'ML softmax';
+    m.lastEvaluationCount = xs.length;
   }
   void _predict(Market m) {
     if(!m.live || m.forecast!=null || m.ticks.length<250) return;
-    _evaluate(m);
+    if (m.lastEvaluationCount == 0 || m.ticks.length - m.lastEvaluationCount >= 100) _evaluate(m);
     final method=['Frequency','Recent 50','Transition blend'].indexOf(m.method);
-    final p=_scores(m.ticks.skip(max(0,m.ticks.length-200)).toList(),max(0,method));
+    final p=m.mlSelected ? m.mlScores : _scores(m.ticks.skip(max(0,m.ticks.length-200)).toList(),max(0,method));
     final digit=_best(p);
     m.forecast=Forecast(digit,m.ticks.last.epoch,m.ticks.length,strategy,DateTime.now(),p[digit]*100,m.method);
   }
@@ -232,7 +304,8 @@ class _DashboardState extends State<Dashboard> {
   }
   void _settle(Market m,V13Tick tick) {
     final f=m.forecast;
-    if(f==null || m.ticks.length<=f.sourceCount) return;
+    if(f==null || tick.epoch < f.sourceEpoch ||
+        (tick.epoch == f.sourceEpoch && m.ticks.length <= f.sourceCount)) return;
     // A genuine NEXT-TICK forecast: score the first subsequent live tick.
     final actual=tick.lastDigit;
     final correct=switch(f.strategy) {
@@ -299,7 +372,7 @@ class _DashboardState extends State<Dashboard> {
         Text('Next tick digit: ${m.forecast?.digit??'—'}'),Text('Model: ${m.method}'),Text('Estimate (uncalibrated): ${m.forecast==null?'—':'${m.forecast!.estimate.toStringAsFixed(1)}%'}'),
         Text('Holdout accuracy: ${m.testCount==0?'—':'${m.holdout.toStringAsFixed(1)}%'}'),
         Text('Training-majority baseline: ${m.testCount==0?'—':'${m.baseline.toStringAsFixed(1)}%'}'),
-        Text('Unseen tests: ${m.testCount}'),Text('Forward Matches: ${_rate(_filtered(symbol:m.symbol,mode:'Matches'))}'),
+        Text('Unseen tests: ${m.testCount}'),Text('ML softmax holdout: ${m.mlTestCount==0?'—':'${m.mlHoldout.toStringAsFixed(1)}%'} • baseline ${m.mlBaseline.toStringAsFixed(1)}% • ${m.mlTestCount} tests'),Text('Forward Matches: ${_rate(_filtered(symbol:m.symbol,mode:'Matches'))}'),
         const Text('Holdout is historical; live forward accuracy is the stronger measure.',style:TextStyle(fontSize:11,color:Colors.white60))])),
       FilledButton(onPressed:(){_predict(m);setState((){});},child:const Text('PREDICT NEXT TICK'))
     ]);
@@ -334,7 +407,7 @@ class _DashboardState extends State<Dashboard> {
     final pages=[_radar,_analyzer,_trades,_history,_journal,_alerts,_settings,_diagnostics];
     const names=['Radar','Analyzer','Trades','History','Journal','Alerts','Settings','Logs'];
     const icons=[Icons.radar,Icons.bar_chart,Icons.swap_horiz,Icons.history,Icons.article_outlined,Icons.notifications_outlined,Icons.settings_outlined,Icons.terminal];
-    return Scaffold(appBar:AppBar(backgroundColor:panel,title:const Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('V13.1 Expert Trader PRO',style:TextStyle(fontSize:19,fontWeight:FontWeight.bold)),Text('Deriv • Experimental market scanner',style:TextStyle(fontSize:11,color:Colors.white70))]),actions:[Padding(padding:const EdgeInsets.only(right:10),child:Center(child:_pill('PUBLIC DATA',color:green)))]),
+    return Scaffold(appBar:AppBar(backgroundColor:panel,title:const Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('V13.2 Expert Trader PRO',style:TextStyle(fontSize:19,fontWeight:FontWeight.bold)),Text('Deriv • Experimental market scanner',style:TextStyle(fontSize:11,color:Colors.white70))]),actions:[Padding(padding:const EdgeInsets.only(right:10),child:Center(child:_pill('PUBLIC DATA',color:green)))]),
       body:SafeArea(child:Column(children:[Expanded(child:ListView(padding:const EdgeInsets.all(14),children:[pages[tab]()])),
         Container(height:69,color:panel,child:ListView.builder(scrollDirection:Axis.horizontal,itemCount:names.length,itemBuilder:(context,i)=>InkWell(onTap:()=>setState(()=>tab=i),child:Container(width:max(66.0,MediaQuery.sizeOf(context).width/6.2),padding:const EdgeInsets.symmetric(vertical:7),decoration:BoxDecoration(color:tab==i?blue.withOpacity(.2):Colors.transparent,borderRadius:BorderRadius.circular(12)),child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[Icon(icons[i],size:22,color:tab==i?cyan:Colors.white70),const SizedBox(height:3),Text(names[i],style:TextStyle(fontSize:10,color:tab==i?cyan:Colors.white70))])))))])));
   }
