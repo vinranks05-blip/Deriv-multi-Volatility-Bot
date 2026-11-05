@@ -72,7 +72,7 @@ class _DashboardState extends State<Dashboard> {
   Timer? clock;
   int tab = 0, strategy = 0, scanRemaining = 10, tickCount = 0;
   String selected = 'R_25';
-  bool autoScan = true, autoReconnect = true, notifications = true;
+  bool autoScan = true, notifications = true;
   String connection = 'CONNECTING';
   static const modes = ['Matches','Even/Odd','Over/Under'];
   Market market(String symbol) => markets.firstWhere((m) => m.symbol == symbol);

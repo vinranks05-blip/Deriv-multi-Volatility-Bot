@@ -52,7 +52,7 @@ class V13MarketData {
     try {
       final channel = WebSocketChannel.connect(Uri.parse(url));
       _socket = channel;
-      await channel.ready;
+      await channel.ready.timeout(const Duration(seconds: 15));
       if (_disposed || generation != _generation) {
         await channel.sink.close();
         return;
