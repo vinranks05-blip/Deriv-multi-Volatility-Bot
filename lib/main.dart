@@ -1,1954 +1,354 @@
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-
 import 'package:flutter/material.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'deriv_v13_market_data.dart';
 
-void main() => runApp(const V12App());
+void main() => runApp(const V13App());
+const bg = Color(0xff030d26), panel = Color(0xff10234b);
+const cyan = Color(0xff00d8ff), blue = Color(0xff1385ff);
+const green = Color(0xff00e5a0), red = Color(0xffff5275);
 
-const bg = Color(0xff030d26);
-const panel = Color(0xff10234b);
-const cyan = Color(0xff00d8ff);
-const blue = Color(0xff1385ff);
-const green = Color(0xff00e5a0);
-const red = Color(0xffff5275);
-
-class V12App extends StatelessWidget {
-  const V12App({super.key});
-
+class V13App extends StatelessWidget {
+  const V13App({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData.dark(useMaterial3: true).copyWith(
-          scaffoldBackgroundColor: bg,
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: cyan,
-            brightness: Brightness.dark,
-          ),
-        ),
-        home: const Dashboard(),
-      );
+    debugShowCheckedModeBanner: false,
+    theme: ThemeData.dark(useMaterial3: true).copyWith(
+      scaffoldBackgroundColor: bg,
+      colorScheme: ColorScheme.fromSeed(seedColor: cyan, brightness: Brightness.dark)),
+    home: const Dashboard());
 }
 
-class TickPoint {
-  final double quote;
-  final int epoch;
-  final int digit;
-
-  TickPoint(this.quote, this.epoch, this.digit);
+class Forecast {
+  final int digit, sourceEpoch, strategy;
+  final DateTime issued;
+  final double estimate;
+  final String method;
+  const Forecast(this.digit, this.sourceEpoch, this.strategy, this.issued, this.estimate, this.method);
 }
-
-class Market {
-  final String symbol;
-  final String name;
-  final int precision;
-  final List<TickPoint> ticks = [];
-
-  bool live = false;
-  int? prediction;
-  int? predictedEpoch;
-  DateTime? predictionDeadline;
-  int predictionStrategy = 0;
-  String trend = 'WAIT';
-  double agreement = 0;
-  double nextDigitEstimate = 0;
-  String predictionMethod = 'WAITING';
-  double validatedAccuracy = 0;
-  int validationSamples = 0;
-  double baselineAccuracy = 0;
-  bool signalQualified = false;
-  double mlAccuracy = 0;
-  double mlBaseline = 0;
-  int mlTestCount = 0;
-  List<double> mlProbabilities = List<double>.filled(10, 0.1);
-  double? rsi;
-  double? macd;
-  double? atr;
-  int? lastSettledEpoch;
-  DateTime? lastSeen;
-
-  Market(this.symbol, this.name, this.precision);
-
-  int? get lastDigit => ticks.isEmpty ? null : ticks.last.digit;
-
-  double get frequency {
-    if (prediction == null || ticks.isEmpty) return 0;
-    return ticks.where((e) => e.digit == prediction).length /
-        ticks.length *
-        100;
-  }
-}
-
-class Observation {
-  final String symbol;
-  final String strategy;
-  final int predicted;
-  final int observed;
-  final int epoch;
+class Result {
+  final String symbol, mode;
+  final int predicted, actual, epoch;
   final bool correct;
-
-  Observation(
-    this.symbol,
-    this.strategy,
-    this.predicted,
-    this.observed,
-    this.epoch,
-    this.correct,
-  );
-
-  Map<String, dynamic> toJson() => {
-        'symbol': symbol,
-        'strategy': strategy,
-        'predicted': predicted,
-        'observed': observed,
-        'epoch': epoch,
-        'correct': correct,
-      };
-
-  factory Observation.fromJson(Map<String, dynamic> j) => Observation(
-        j['symbol'],
-        j['strategy'],
-        j['predicted'],
-        j['observed'],
-        j['epoch'],
-        j['correct'],
-      );
+  Result(this.symbol, this.mode, this.predicted, this.actual, this.epoch, this.correct);
+  Map<String, dynamic> toJson() => {'symbol':symbol,'mode':mode,'predicted':predicted,'actual':actual,'epoch':epoch,'correct':correct};
+  factory Result.fromJson(Map<String,dynamic> j) => Result('${j['symbol']}', '${j['mode']}', (j['predicted'] as num).toInt(), (j['actual'] as num).toInt(), (j['epoch'] as num).toInt(), j['correct'] == true);
+}
+class Market {
+  final String symbol, name;
+  final int precision;
+  Market(this.symbol,this.name,this.precision);
+  List<V13Tick> ticks = [];
+  Forecast? forecast;
+  DateTime? lastSeen;
+  String trend = 'COLLECTING', method = 'COLLECTING';
+  double? rsi, macd, movement;
+  double holdout = 0, baseline = 0;
+  int testCount = 0;
+  bool get live => lastSeen != null && DateTime.now().difference(lastSeen!).inSeconds < 15;
+  int? get lastDigit => ticks.isEmpty ? null : ticks.last.lastDigit;
 }
 
 class Dashboard extends StatefulWidget {
   const Dashboard({super.key});
-
-  @override
-  State<Dashboard> createState() => _DashboardState();
+  @override State<Dashboard> createState() => _DashboardState();
 }
-
 class _DashboardState extends State<Dashboard> {
+  final data = V13MarketData();
   final markets = [
-    Market('R_10', 'Volatility 10', 3),
-    Market('R_25', 'Volatility 25', 3),
-    Market('R_50', 'Volatility 50', 4),
-    Market('R_75', 'Volatility 75', 4),
-    Market('R_100', 'Volatility 100', 2),
-    Market('1HZ10V', 'Volatility 10 (1s)', 2),
-    Market('1HZ25V', 'Volatility 25 (1s)', 2),
-    Market('1HZ50V', 'Volatility 50 (1s)', 2),
-    Market('1HZ75V', 'Volatility 75 (1s)', 2),
-    Market('1HZ100V', 'Volatility 100 (1s)', 2),
+    Market('R_10','Volatility 10',3), Market('R_25','Volatility 25',3),
+    Market('R_50','Volatility 50',4), Market('R_75','Volatility 75',4),
+    Market('R_100','Volatility 100',2), Market('1HZ10V','Volatility 10 (1s)',2),
+    Market('1HZ25V','Volatility 25 (1s)',2), Market('1HZ50V','Volatility 50 (1s)',2),
+    Market('1HZ75V','Volatility 75 (1s)',2), Market('1HZ100V','Volatility 100 (1s)',2),
   ];
-
-  final observations = <Observation>[];
+  final results = <Result>[];
+  final logs = <String>[];
   final alerts = <String>[];
-  final unsupportedSymbols = <String>{};
-
-  WebSocketChannel? channel;
-  StreamSubscription? subscription;
+  final journal = TextEditingController();
+  final subscriptions = <StreamSubscription>[];
   Timer? clock;
-  Timer? reconnect;
-  Timer? heartbeat;
-
-  int tab = 0;
-  int strategy = 0;
-  int remaining = 10;
-  int reconnectAttempts = 0;
-  int connectionGeneration = 0;
-
-  bool grid = false;
-  bool autoScan = true;
-  bool sound = true;
-  bool autoReconnect = true;
-  bool connecting = false;
-  bool socketReady = false;
-
-  String status = 'CONNECTING';
+  int tab = 0, strategy = 0, scanRemaining = 10, tickCount = 0;
   String selected = 'R_25';
-  String note = '';
-  String accountStatus = 'NOT AUTHENTICATED';
-  String accountId = '';
-  String balanceText = '—';
-  String authToken = '';
-  final tokenController = TextEditingController();
-  final diagnosticLogs = <String>[];
-  DateTime? lastTick;
-  int tickCount = 0;
-  // Demo-only broker order state. Never auto-purchase or submit on real accounts.
-  int orderSequence = 20000;
-  int tradesPlaced = 0;
-  int consecutiveLosses = 0;
-  double sessionProfit = 0;
-  bool orderPending = false;
-  int? openContractId;
-  bool contractRecoveryPending = false;
-  bool purchaseUnconfirmed = false;
-  int? activeBuyRequestId;
-  String activeOrderSymbol = '';
-  String activeOrderType = '';
-  final Set<int> settledContracts = <int>{};
-  String orderState = 'IDLE';
-  final List<String> orderHistory = [];
-  String orderType = 'DIGITMATCH';
-  final TextEditingController barrierController = TextEditingController(text: '5');
-  final TextEditingController stakeController = TextEditingController(text: '0.35');
-  String currency = 'USD';
-  bool get demoAuthorized => accountStatus == 'DEMO AUTHENTICATED';
-  bool get canOrder => socketReady && demoAuthorized && !orderPending && !purchaseUnconfirmed && !contractRecoveryPending && openContractId == null &&
-      tradesPlaced < 6 && consecutiveLosses < 2 && sessionProfit > -1.0 && sessionProfit < 1.0;
-  void _sendOrderRequest(Map<String, dynamic> request) {
-    final socket = channel;
-    if (socket == null || !socketReady) { _log('ORDER', 'WebSocket is not connected'); return; }
-    socket.sink.add(jsonEncode(request));
-  }
-  void _requestProposal() {
-    if (!canOrder) { _log('ORDER', 'Blocked: demo auth, limits, or open order'); return; }
-    final stake = double.tryParse(stakeController.text);
-    final barrier = int.tryParse(barrierController.text);
-    final needsBarrier = !['DIGITEVEN', 'DIGITODD'].contains(orderType);
-    if (stake == null || stake < 0.35 || stake > 10 ||
-        (needsBarrier && (barrier == null || barrier < 0 || barrier > 9))) {
-      _log('ORDER', 'Invalid stake or barrier'); return;
-    }
-    final market = markets.firstWhere((m) => m.symbol == selected);
-    if (!market.live) { _log('ORDER', 'Selected market feed is not live'); return; }
-    setState(() { orderPending = true; orderState = 'REQUESTING PROPOSAL'; activeOrderSymbol = selected; activeOrderType = orderType; });
-    _sendOrderRequest({'proposal': 1, 'amount': stake, 'basis': 'stake',
-      'contract_type': orderType, 'currency': currency, 'duration': 10,
-      'duration_unit': 't', 'symbol': selected,
-      if (!['DIGITEVEN', 'DIGITODD'].contains(orderType)) 'barrier': barrier.toString(),
-      'req_id': ++orderSequence});
-    _log('ORDER', 'Requested proposal $orderType $selected; no purchase yet');
-  }
-  Future<void> _confirmPurchase(String proposalId, double askPrice) async {
-    if (!mounted || !demoAuthorized || !orderPending) return;
-    final approved = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
-      title: const Text('Confirm DEMO purchase'),
-      content: Text('$orderType on $selected\nPrice: $askPrice $currency\n'
-        'This submits a real broker order on your DEMO account.'),
-      actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
-        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('BUY DEMO'))]));
-    if (!mounted) return;
-    if (approved != true || !demoAuthorized) {
-      setState(() { orderPending = false; orderState = 'CANCELLED'; }); return;
-    }
-    activeBuyRequestId = ++orderSequence;
-    purchaseUnconfirmed = true;
-    _sendOrderRequest({'buy': proposalId, 'price': askPrice, 'req_id': activeBuyRequestId});
-    setState(() => orderState = 'PURCHASE SENT');
-    _log('ORDER', 'Purchase submitted; awaiting broker confirmation');
-  }
-  void _orderMessage(Map<String, dynamic> j) {
-    final type = j['msg_type'];
-    if (type == 'proposal' && j['proposal'] is Map && orderPending) {
-      final proposal = j['proposal'] as Map;
-      final id = proposal['id']?.toString();
-      final price = (proposal['ask_price'] as num?)?.toDouble();
-      if (id != null && price != null) { _confirmPurchase(id, price); }
-      else { setState(() { orderPending = false; orderState = 'INVALID PROPOSAL'; }); }
-      return;
-    }
-    if (type == 'buy' && j['buy'] is Map) {
-      final buy = j['buy'] as Map;
-      final id = (buy['contract_id'] as num?)?.toInt();
-      if (id == null) { _log('ORDER', 'Missing contract ID'); return; }
-      setState(() { openContractId = id; orderPending = false; purchaseUnconfirmed = false; contractRecoveryPending = false; tradesPlaced++; orderState = 'OPEN #$id'; });
-      orderHistory.insert(0, 'OPEN #$id • $activeOrderType • $activeOrderSymbol');
-      _log('ORDER', 'Broker confirmed purchase #$id');
-      _sendOrderRequest({'proposal_open_contract': 1, 'contract_id': id, 'subscribe': 1});
-      return;
-    }
-    if (type == 'proposal_open_contract' && j['proposal_open_contract'] is Map) {
-      final contract = j['proposal_open_contract'] as Map;
-      final id = (contract['contract_id'] as num?)?.toInt();
-      if (id == null || id != openContractId) return;
-      if (contract['is_sold'] == 1 && !settledContracts.contains(id)) {
-        final profit = (contract['profit'] as num?)?.toDouble();
-        if (profit == null) { _log('ORDER', 'Sold but no verified profit returned'); return; }
-        setState(() {
-          settledContracts.add(id);
-          contractRecoveryPending = false;
-          sessionProfit += profit;
-          consecutiveLosses = profit < 0 ? consecutiveLosses + 1 : 0;
-          orderState = 'SETTLED #$id'; openContractId = null;
-          orderHistory.insert(0, 'SETTLED #$id • P/L ${profit.toStringAsFixed(2)} $currency');
-        });
-        _log('ORDER', 'Settled #$id; broker P/L $profit $currency');
-      }
-    }
-  }
+  bool autoScan = true, autoReconnect = true, notifications = true;
+  String connection = 'CONNECTING';
+  static const modes = ['Matches','Even/Odd','Over/Under'];
+  Market market(String symbol) => markets.firstWhere((m) => m.symbol == symbol);
 
-
-  DateTime? lastMessage;
-
-  @override
-  void initState() {
+  @override void initState() {
     super.initState();
     _load();
-    _log('APP', 'Diagnostics initialized');
-    _connect();
-
+    subscriptions.add(data.ticks.listen(_onTick));
+    subscriptions.add(data.historyUpdates.listen(_onHistory));
+    subscriptions.add(data.errors.listen((e) {
+      if (!mounted) return;
+      _log(e);
+      setState(() => connection = data.connected ? 'PUBLIC LIVE' : 'RECONNECTING');
+    }));
+    subscriptions.add(data.symbols.listen((s) { _log('Available volatility symbols: ${s.length}'); }));
+    for (final m in markets) { data.watch(m.symbol); }
+    data.connect();
     clock = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-
       setState(() {
-        remaining = remaining <= 1 ? 10 : remaining - 1;
-
-        for (final m in markets) {
-          if (m.lastSeen != null &&
-              DateTime.now().difference(m.lastSeen!).inSeconds > 12) {
-            m.live = false;
-          }
-        }
+        connection = data.connected ? (tickCount > 0 ? 'PUBLIC LIVE' : 'SUBSCRIBING') : 'RECONNECTING';
+        scanRemaining = scanRemaining <= 1 ? 10 : scanRemaining - 1;
       });
-
-      if (autoScan && remaining == 10) {
-        _observe();
-      }
-
-      if (lastMessage != null &&
-          DateTime.now().difference(lastMessage!).inSeconds > 35 &&
-          (status == 'PUBLIC LIVE' || status == 'SUBSCRIBING')) {
-        _reconnect();
-      }
+      if (autoScan && scanRemaining == 10) _scan();
     });
   }
-
   Future<void> _load() async {
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
-
     setState(() {
-      autoScan = p.getBool('autoScan') ?? true;
-      autoReconnect = p.getBool('autoReconnect') ?? true;
-      sound = p.getBool('sound') ?? true;
-      note = p.getString('journalNote') ?? '';
-      // Token is intentionally not persisted in unencrypted preferences.
-
-      final raw = p.getStringList('observations') ?? [];
-
-      for (final x in raw) {
-        try {
-          observations.add(
-            Observation.fromJson(
-              Map<String, dynamic>.from(jsonDecode(x)),
-            ),
-          );
-        } catch (_) {}
+      autoScan = p.getBool('v13_autoScan') ?? true;
+      notifications = p.getBool('v13_alerts') ?? true;
+      journal.text = p.getString('v13_journal') ?? '';
+      for (final raw in p.getStringList('v13_results') ?? []) {
+        try { results.add(Result.fromJson(Map<String,dynamic>.from(_decode(raw)))); } catch (_) {}
       }
     });
   }
-
+  dynamic _decode(String raw) => jsonDecode(raw);
   Future<void> _save() async {
     final p = await SharedPreferences.getInstance();
-
-    await p.setBool('autoScan', autoScan);
-    await p.setBool('autoReconnect', autoReconnect);
-    await p.setBool('sound', sound);
-    await p.setStringList(
-      'observations',
-      observations.take(300).map((x) => jsonEncode(x.toJson())).toList(),
-    );
+    await p.setBool('v13_autoScan',autoScan);
+    await p.setBool('v13_alerts',notifications);
+    await p.setString('v13_journal',journal.text);
+    await p.setStringList('v13_results',results.take(300).map((r)=>jsonEncode(r.toJson())).toList());
   }
-
-  
-Future<void> _connect() async {
-    if (!mounted || connecting) return;
-    reconnect?.cancel();
-    heartbeat?.cancel();
-    final generation = ++connectionGeneration;
-    connecting = true;
-    socketReady = false;
-    setState(() => status = 'CONNECTING');
-
-    final oldSubscription = subscription;
-    final oldChannel = channel;
-    subscription = null;
-    channel = null;
-    await oldSubscription?.cancel();
-    try { await oldChannel?.sink.close(); } catch (_) {}
-
-    // Deriv Options API public market-data WebSocket (no token needed).
-    // Demo trading requires a separate OTP-authenticated demo socket.
-    const endpoints = [
-      'wss://api.derivws.com/trading/v1/options/ws/public',
-    ];
-    WebSocketChannel? connectedSocket;
-    for (final endpoint in endpoints) {
-      if (!mounted || generation != connectionGeneration) return;
-      WebSocketChannel? candidate;
-      try {
-        _log('SOCKET', 'Trying $endpoint');
-        candidate = WebSocketChannel.connect(Uri.parse(endpoint));
-        await candidate.ready.timeout(const Duration(seconds: 12));
-        if (!mounted || generation != connectionGeneration) {
-          await candidate.sink.close();
-          return;
-        }
-        connectedSocket = candidate;
-        _log('SOCKET', 'Handshake successful: $endpoint');
-        break;
-      } catch (error) {
-        _log('SOCKET ERROR', '$endpoint: $error');
-        try { await candidate?.sink.close(); } catch (_) {}
-      }
-    }
-    if (!mounted || generation != connectionGeneration) {
-      try { await connectedSocket?.sink.close(); } catch (_) {}
-      return;
-    }
-    connecting = false;
-    if (connectedSocket == null) {
-      setState(() => status = 'CONNECTION FAILED');
-      _addAlert('Public Deriv WebSocket handshake failed. Check network and connection logs.');
-      _reconnect();
-      return;
-    }
-
-    final ws = connectedSocket;
-    channel = ws;
-    socketReady = true;
-    lastMessage = DateTime.now();
-    // Reset retry counter only after receiving live market data.
-    subscription = ws.stream.listen(
-      _message,
-      onError: (Object error) {
-        if (!mounted || generation != connectionGeneration) return;
-        _log('SOCKET ERROR', error.toString());
-        _addAlert('Connection error: $error');
-        _reconnect();
-      },
-      onDone: () {
-        if (!mounted || generation != connectionGeneration) return;
-        _log('SOCKET', 'Connection closed by server');
-        _reconnect();
-      },
-      cancelOnError: true,
-    );
-    setState(() {
-      status = 'SUBSCRIBING';
-      accountStatus = 'PUBLIC DATA ONLY';
-      accountId = '';
-      balanceText = '—';
-    });
-    try {
-      _log('SOCKET', 'Connected to public market data; demo orders disabled');
-      for (final market in markets) {
-        if (unsupportedSymbols.contains(market.symbol)) continue;
-        ws.sink.add(jsonEncode({
-          'ticks': market.symbol,
-          'subscribe': 1,
-        }));
-        _log('FEED', 'Subscribed to ${market.symbol}');
-      }
-      heartbeat = Timer.periodic(const Duration(seconds: 25), (_) {
-        if (!mounted || generation != connectionGeneration || !socketReady) return;
-        try {
-          ws.sink.add(jsonEncode({'ping': 1}));
-        } catch (error) {
-          _log('HEARTBEAT', error.toString());
-          _reconnect();
-        }
-      });
-    } catch (error) {
-      _log('SOCKET ERROR', 'Subscription failed: $error');
-      _reconnect();
-    }
+  void _log(String msg) {
+    logs.insert(0, '${DateTime.now().toIso8601String().substring(11,19)}  $msg');
+    if (logs.length > 150) logs.removeLast();
   }
-
-  void _reconnect() {
-    if (!mounted || reconnect?.isActive == true) return;
-    connectionGeneration++;
-    heartbeat?.cancel();
-    subscription?.cancel();
-    subscription = null;
-    try { channel?.sink.close(); } catch (_) {}
-    channel = null;
-    socketReady = false;
-    connecting = false;
-    if (orderPending && purchaseUnconfirmed) {
-      contractRecoveryPending = true;
-      _log('ORDER', 'Purchase outcome unknown; trading blocked until reconciled');
-    }
-    orderPending = false;
-    orderState = openContractId == null
-        ? 'DISCONNECTED'
-        : 'CONNECTION LOST — VERIFY CONTRACT IN DERIV';
-    setState(() {
-      status = autoReconnect ? 'RECONNECTING' : 'DISCONNECTED';
-      accountStatus = 'NOT AUTHENTICATED';
-      accountId = '';
-      balanceText = '—';
-      for (final m in markets) { m.live = false; }
-    });
-    if (!autoReconnect) return;
-    final delay = min(30, 2 << min(reconnectAttempts++, 4));
-    _log('RECONNECT', 'Retry in $delay seconds');
-    reconnect = Timer(Duration(seconds: delay), _connect);
-  }
-
-  void _log(String category, String message) {
+  void _onHistory(String symbol) {
     if (!mounted) return;
-    final time = DateTime.now().toIso8601String().split('T').last.split('.').first;
-    diagnosticLogs.insert(0, '[$time] $category: $message');
-    if (diagnosticLogs.length > 300) diagnosticLogs.removeLast();
+    final m = market(symbol);
+    m.ticks = List.of(data.history[symbol] ?? []);
+    _indicators(m);
+    _log('History ${m.symbol}: ${m.ticks.length} ticks');
+    setState(() {});
   }
-
-  void _authorize(String token) {
-    // The public endpoint cannot authorize an account. Do not transmit PATs
-    // to it or silently enable trading without an OTP-authenticated demo socket.
-    tokenController.clear();
-    authToken = '';
-    _log('AUTH', 'Demo login unavailable in public-data build. OTP integration required.');
-    _addAlert('Demo trading needs account ID, App ID and OTP-authenticated demo WebSocket.');
-    setState(() => accountStatus = 'PUBLIC DATA ONLY');
-  }
-
-  void _addAlert(String message) {
+  void _onTick(V13Tick tick) {
     if (!mounted) return;
-
-    setState(() {
-      alerts.insert(0, message);
-      if (alerts.length > 80) {
-        alerts.removeLast();
-      }
-    });
+    final m = market(tick.symbol);
+    m.ticks = List.of(data.history[tick.symbol] ?? []);
+    m.lastSeen = DateTime.now();
+    tickCount++;
+    if (tickCount % 5 == 0) _indicators(m);
+    _settle(m, tick);
+    setState(() => connection = 'PUBLIC LIVE');
   }
-
-  void _message(dynamic raw) {
-    try {
-      final j = jsonDecode(raw as String) as Map<String, dynamic>;
-      lastMessage = DateTime.now();
-
-      if (j['error'] == null && j['msg_type'] == 'authorize' && j['authorize'] is Map) {
-        final a = j['authorize'] as Map;
-        accountId = a['loginid']?.toString() ?? '';
-        currency = a['currency']?.toString() ?? 'USD';
-        accountStatus = (a['is_virtual'] == 1 || a['is_virtual'] == true) ? 'DEMO AUTHENTICATED' : 'REAL ACCOUNT - READ ONLY';
-        _log('AUTH', 'Authorized account $accountId');
-        if (openContractId != null && demoAuthorized) {
-          contractRecoveryPending = true;
-          channel?.sink.add(jsonEncode({'proposal_open_contract': 1, 'contract_id': openContractId, 'subscribe': 1}));
-          _log('ORDER', 'Rechecking open contract #$openContractId');
-        }
-        channel?.sink.add(jsonEncode({'balance': 1, 'subscribe': 1}));
-        setState(() {});
-        return;
-      }
-      if (j['msg_type'] == 'balance' && j['balance'] is Map) {
-        final b = j['balance'] as Map;
-        balanceText = '${b['balance'] ?? '—'} ${b['currency'] ?? ''}';
-        setState(() {});
-        return;
-      }
-      if (j['error'] != null) {
-        if (['proposal', 'buy'].contains(j['msg_type']) || (j['echo_req'] is Map && ((j['echo_req'] as Map).containsKey('proposal') || (j['echo_req'] as Map).containsKey('buy')))) {
-          orderPending = false; purchaseUnconfirmed = false; orderState = 'ORDER ERROR';
-        }
-        final error = j['error'];
-        final message = error is Map
-            ? (error['message']?.toString() ?? 'API error')
-            : 'API error';
-
-        final echo = j['echo_req'];
-        final symbol =
-            echo is Map ? echo['ticks']?.toString() : null;
-
-        if (symbol != null &&
-            (message.toLowerCase().contains('symbol') ||
-                message.toLowerCase().contains('market'))) {
-          unsupportedSymbols.add(symbol);
-        }
-
-        final code = error is Map ? error['code']?.toString() ?? 'unknown' : 'unknown';
-        _log('DERIV ERROR', '$code: $message');
-        if (j['echo_req'] is Map && (j['echo_req'] as Map).containsKey('authorize')) {
-          accountStatus = 'AUTH FAILED';
-          authToken = '';
-          _log('AUTH', 'Authorization rejected; re-enter a valid demo token');
-        }
-        _addAlert('Deriv: $message');
-
-        if (mounted) {
-          setState(() {
-            if (echo is Map && echo.containsKey('authorize')) {
-              accountStatus = 'AUTH FAILED';
-            } else if (symbol != null) {
-              if (tickCount == 0) status = 'FEED ERROR';
-            }
-          });
-        }
-        return;
-      }
-
-      if (['proposal', 'buy', 'proposal_open_contract'].contains(j['msg_type'])) { _orderMessage(j); return; }
-      if (j['msg_type'] != 'tick') return;
-
-      final t = j['tick'];
-      if (t is! Map) return;
-
-      Market? m;
-      for (final market in markets) {
-        if (market.symbol == t['symbol']) {
-          m = market;
-          break;
-        }
-      }
-
-      if (m == null ||
-          t['quote'] is! num ||
-          t['epoch'] is! num) {
-        return;
-      }
-
-      final q = (t['quote'] as num).toDouble();
-      final epoch = (t['epoch'] as num).toInt();
-      final rawPrecision = t['pip_size'];
-      final precision =
-          rawPrecision is num ? rawPrecision.toInt() : m.precision;
-
-      if (precision < 0 || precision > 10) return;
-
-      final formatted = q.toStringAsFixed(precision);
-      final digit = int.tryParse(
-        formatted.substring(formatted.length - 1),
-      );
-
-      if (digit == null) return;
-
-      if (m.ticks.isNotEmpty &&
-          m.ticks.last.epoch == epoch &&
-          m.ticks.last.quote == q) {
-        return;
-      }
-
-      m.ticks.add(TickPoint(q, epoch, digit));
-
-      if (m.ticks.length > 200) {
-        m.ticks.removeAt(0);
-      }
-
-      m.lastSeen = DateTime.now();
-      lastTick = DateTime.now();
-      tickCount++;
-      if (m.ticks.length == 1) _log('FEED', '${m.symbol} first tick');
-      m.live = true;
-      reconnectAttempts = 0;
-
-      _trend(m);
-      _settle(m);
-
-      if (mounted) {
-        setState(() => status = 'PUBLIC LIVE');
-      }
-    } catch (error) {
-      _addAlert('Market data parsing error: $error');
+  void _indicators(Market m) {
+    if (m.ticks.length < 50) return;
+    final xs = m.ticks.skip(max(0,m.ticks.length-300)).map((t)=>t.price).toList();
+    double ema(int period) {
+      var v = xs.first;
+      final k = 2/(period+1);
+      for (final x in xs.skip(1)) { v += k*(x-v); }
+      return v;
     }
+    final a = ema(20), b = ema(50);
+    m.trend = a > b ? 'UP' : a < b ? 'DOWN' : 'SIDEWAYS';
+    var gain=0.0, loss=0.0, move=0.0;
+    for (var i=xs.length-14; i<xs.length; i++) {
+      final d=xs[i]-xs[i-1];
+      if(d>0) gain+=d; else loss-=d;
+      move+=d.abs();
+    }
+    m.rsi = loss==0 ? (gain==0 ? 50.0 : 100.0) : 100-100/(1+gain/loss);
+    m.macd = ema(12)-ema(26);
+    m.movement=move/14;
   }
-
-  void _trend(Market m) {
-    if (m.ticks.length < 50) {
-      m.trend = 'COLLECTING';
-      return;
+  List<double> _scores(List<V13Tick> xs, int method) {
+    final counts=List<double>.filled(10,1);
+    final recent=List<double>.filled(10,1);
+    final transitions=List<double>.filled(10,1);
+    final previous=xs.last.lastDigit;
+    for(var i=0;i<xs.length;i++) {
+      final d=xs[i].lastDigit;
+      counts[d]++;
+      if(i>=xs.length-50) recent[d]++;
+      if(i>0 && xs[i-1].lastDigit==previous) transitions[d]++;
     }
-
-    final xs = m.ticks.map((e) => e.quote).toList();
-
-    double ema(int n) {
-      var a = xs.first;
-      final k = 2 / (n + 1);
-
-      for (final x in xs.skip(1)) {
-        a = x * k + a * (1 - k);
-      }
-
-      return a;
-    }
-
-    final a = ema(20);
-    final b = ema(50);
-
-    m.trend = a > b
-        ? 'UP'
-        : a < b
-            ? 'DOWN'
-            : 'SIDEWAYS';
-
-    // Tick-derived indicators, NOT 1m/5m/15m closed-candle signals.
-    var gains = 0.0;
-    var losses = 0.0;
-    for (var i = xs.length - 14; i < xs.length; i++) {
-      final delta = xs[i] - xs[i - 1];
-      if (delta > 0) { gains += delta; } else { losses -= delta; }
-    }
-    m.rsi = losses == 0 ? (gains == 0 ? 50.0 : 100.0)
-        : 100.0 - 100.0 / (1.0 + gains / losses);
-    double emaFor(int period) {
-      var value = xs.first;
-      final factor = 2.0 / (period + 1);
-      for (final x in xs.skip(1)) { value += factor * (x - value); }
-      return value;
-    }
-    m.macd = emaFor(12) - emaFor(26);
-    var sumMovement = 0.0;
-    for (var i = xs.length - 14; i < xs.length; i++) {
-      sumMovement += (xs[i] - xs[i - 1]).abs();
-    }
-    m.atr = sumMovement / 14; // Mean tick movement; not candle ATR.
-    m.agreement = ((a - b).abs() /
-            (xs.last.abs() + 0.0001) *
-            10000)
-        .clamp(0, 100)
-        .toDouble();
+    List<double> norm(List<double> a) { final total=a.reduce((x,y)=>x+y); return a.map((v)=>v/total).toList(); }
+    final global=norm(counts), local=norm(recent), conditional=norm(transitions);
+    if(method==0) return global;
+    if(method==1) return local;
+    final n=transitions.reduce((x,y)=>x+y)-10;
+    final w=n/(n+50);
+    return List.generate(10,(i)=>w*conditional[i]+(1-w)*global[i]);
   }
-
-  // V12.3: Walk-forward digit analysis. Each historical forecast uses ONLY
-  // ticks preceding its forecast timestamp. Evaluation targets the first
-  // observed tick at least 10 seconds later, matching live settlement.
-  // This is an observational experiment, not a guaranteed trading signal.
-  List<double> _digitScores(List<TickPoint> history, int method) {
-    final frequency = List<double>.filled(10, 1.0);
-    final transition = List<double>.filled(10, 1.0);
-    final recent = List<double>.filled(10, 1.0);
-    if (history.isEmpty) return List<double>.filled(10, 0.1);
-    final previous = history.last.digit;
-    for (var i = 0; i < history.length; i++) {
-      final digit = history[i].digit;
-      frequency[digit]++;
-      if (i >= history.length - 50) recent[digit]++;
-      if (i > 0 && history[i - 1].digit == previous) transition[digit]++;
-    }
-    List<double> normalize(List<double> counts) {
-      final total = counts.reduce((a, b) => a + b);
-      return counts.map((v) => v / total).toList();
-    }
-    final global = normalize(frequency);
-    final local = normalize(recent);
-    final conditional = normalize(transition);
-    if (method == 0) return global;
-    if (method == 1) return local;
-    final transitions = transition.reduce((a, b) => a + b) - 10;
-    final weight = transitions / (transitions + 50.0);
-    return List.generate(10, (d) =>
-      weight * conditional[d] + (1 - weight) * global[d]);
-  }
-
-  int _bestDigit(List<double> scores) {
-    var best = 0;
-    for (var d = 1; d < 10; d++) {
-      if (scores[d] > scores[best]) best = d;
-    }
+  int _best(List<double> p) {
+    var best=0;
+    for(var i=1;i<10;i++) { if(p[i]>p[best]) best=i; }
     return best;
   }
-
-  // Lightweight on-device multiclass logistic regression (softmax).
-  // The label is the first tick at least 10 seconds after the feature tick.
-  // Train on older observations, evaluate on the newest chronological 30%.
-  // No future digit is used as a feature, and no external ML package is needed.
-  List<double> _mlFeatures(List<TickPoint> ticks, int i) {
-    final x = List<double>.filled(31, 0);
-    x[0] = 1;
-    x[1 + ticks[i].digit] = 1;
-    x[11 + ticks[i - 1].digit] = 1;
-    final start = max(0, i - 49);
-    for (var j = start; j <= i; j++) {
-      x[21 + ticks[j].digit] += 1 / (i - start + 1);
+  // Chronological holdout; choose a model only from training history.
+  // The holdout remains untouched by model selection.
+  void _evaluate(Market m) {
+    final xs=m.ticks;
+    if(xs.length<250) { m.testCount=0; m.method='COLLECTING'; return; }
+    final cut=(xs.length*.7).floor();
+    final train=xs.sublist(0,cut);
+    final wins=List<int>.filled(3,0);
+    for(var i=100;i<train.length-1;i+=5) {
+      final actual=train[i+1].lastDigit;
+      final h=train.sublist(max(0,i-199),i+1);
+      for(var k=0;k<3;k++) { if(_best(_scores(h,k))==actual) wins[k]++; }
     }
-    return x;
-  }
-
-  List<double> _softmax(List<double> logits) {
-    final largest = logits.reduce(max);
-    final expValues = logits.map((v) => exp(v - largest)).toList();
-    final total = expValues.reduce((a, b) => a + b);
-    return expValues.map((v) => v / total).toList();
-  }
-
-  List<double> _mlPredict(List<List<double>> weights, List<double> x) {
-    return _softmax(List.generate(10, (d) {
-      var v = 0.0;
-      for (var f = 0; f < x.length; f++) { v += weights[d][f] * x[f]; }
-      return v;
-    }));
-  }
-
-  void _evaluateML(Market m) {
-    final ticks = m.ticks;
-    if (ticks.length < 160) {
-      m.mlTestCount = 0;
-      m.mlAccuracy = 0;
-      m.mlProbabilities = List<double>.filled(10, 0.1);
-      return;
-    }
-    final examples = <(List<double>, int)>[];
-    for (var i = 50; i < ticks.length - 1; i++) {
-      final deadline = ticks[i].epoch + 10;
-      var target = i + 1;
-      while (target < ticks.length && ticks[target].epoch < deadline) { target++; }
-      if (target >= ticks.length) break;
-      examples.add((_mlFeatures(ticks, i), ticks[target].digit));
-    }
-    if (examples.length < 80) return;
-    final split = (examples.length * 0.7).floor();
-    final weights = List.generate(10, (_) => List<double>.filled(31, 0));
-    // Train only on the first 70%; deterministic, regularized SGD.
-    for (var epoch = 0; epoch < 8; epoch++) {
-      for (var i = 0; i < split; i++) {
-        final x = examples[i].$1;
-        final label = examples[i].$2;
-        final probabilities = _mlPredict(weights, x);
-        const learningRate = 0.035;
-        for (var d = 0; d < 10; d++) {
-          final error = (d == label ? 1.0 : 0.0) - probabilities[d];
-          for (var f = 0; f < x.length; f++) {
-            weights[d][f] += learningRate * (error * x[f] - 0.001 * weights[d][f]);
-          }
-        }
-      }
-    }
-    var correct = 0;
-    var baseline = 0;
-    for (var i = split; i < examples.length; i++) {
-      final actual = examples[i].$2;
-      if (_bestDigit(_mlPredict(weights, examples[i].$1)) == actual) correct++;
-      if (actual == 0) baseline++;
-    }
-    final count = examples.length - split;
-    m.mlTestCount = count;
-    m.mlAccuracy = 100 * correct / count;
-    m.mlBaseline = 100 * baseline / count;
-    m.mlProbabilities = _mlPredict(weights, _mlFeatures(ticks, ticks.length - 1));
-  }
-
-  // Compare three candidate models and a fixed-digit baseline on identical
-  // historical forecast points. Keep the most recent portion for evaluation.
-  // No future ticks enter the model's training window for a tested point.
-  void _evaluateMarket(Market m) {
-    final ticks = m.ticks;
-    final wins = List<int>.filled(4, 0);
-    var tested = 0;
-    if (ticks.length < 150) {
-      m.validationSamples = 0;
-      m.signalQualified = false;
-      return;
-    }
-    final start = max(100, ticks.length - 100);
-    for (var i = start; i < ticks.length - 1; i++) {
-      final deadline = ticks[i].epoch + 10;
-      var target = i + 1;
-      while (target < ticks.length && ticks[target].epoch < deadline) {
-        target++;
-      }
-      if (target >= ticks.length) break;
-      final history = ticks.sublist(max(0, i - 199), i + 1);
-      final actual = ticks[target].digit;
-      for (var method = 0; method < 3; method++) {
-        if (_bestDigit(_digitScores(history, method)) == actual) wins[method]++;
-      }
-      if (actual == 0) wins[3]++;
+    var chosen=0;
+    for(var k=1;k<3;k++) { if(wins[k]>wins[chosen]) chosen=k; }
+    var right=0, baseline=0, tested=0;
+    for(var i=cut;i<xs.length-1;i++) {
+      final h=xs.sublist(max(0,i-199),i+1);
+      final actual=xs[i+1].lastDigit;
+      if(_best(_scores(h,chosen))==actual) right++;
+      if(actual==0) baseline++;
       tested++;
     }
-    m.validationSamples = tested;
-    m.baselineAccuracy = tested == 0 ? 0 : wins[3] * 100 / tested;
-    var bestMethod = 0;
-    for (var method = 1; method < 3; method++) {
-      if (wins[method] > wins[bestMethod]) bestMethod = method;
-    }
-    m.validatedAccuracy = tested == 0 ? 0 : wins[bestMethod] * 100 / tested;
-    m.predictionMethod = ['Frequency', 'Recent 50', 'Transition blend'][bestMethod];
-    // A cautious filter: no claimed edge on a tiny sample or when the model
-    // fails to outperform both chance and the fixed-digit baseline.
-    m.signalQualified = tested >= 60 &&
-        m.validatedAccuracy >= 14 &&
-        m.validatedAccuracy >= m.baselineAccuracy + 3;
+    m.method=['Frequency','Recent 50','Transition blend'][chosen];
+    m.testCount=tested;
+    m.holdout=tested==0?0:100*right/tested;
+    m.baseline=tested==0?0:100*baseline/tested;
   }
-
   void _predict(Market m) {
-    if (!m.live || m.ticks.length < 100 || m.prediction != null) return;
-    _evaluateMarket(m);
-    _evaluateML(m);
-    final method = switch (m.predictionMethod) {
-      'Recent 50' => 1,
-      'Transition blend' => 2,
-      _ => 0,
-    };
-    final scores = m.mlTestCount >= 25 &&
-        m.mlAccuracy >= 14 && m.mlAccuracy >= m.mlBaseline + 3
-        ? m.mlProbabilities : _digitScores(m.ticks, method);
-    if (identical(scores, m.mlProbabilities)) {
-      m.predictionMethod = "ML softmax (experimental)";
-      m.signalQualified = true;
-    }
-    final best = _bestDigit(scores);
-    m.prediction = best;
-    m.nextDigitEstimate = scores[best] * 100;
-    m.predictedEpoch = m.ticks.last.epoch;
-    m.predictionStrategy = strategy;
-    m.predictionDeadline = DateTime.now().add(const Duration(seconds: 10));
+    if(!m.live || m.forecast!=null || m.ticks.length<250) return;
+    _evaluate(m);
+    final method=['Frequency','Recent 50','Transition blend'].indexOf(m.method);
+    final p=_scores(m.ticks.skip(max(0,m.ticks.length-200)).toList(),max(0,method));
+    final digit=_best(p);
+    m.forecast=Forecast(digit,m.ticks.last.epoch,strategy,DateTime.now(),p[digit]*100,m.method);
   }
-
-  void _observe() {
-    for (final m in markets) {
-      if (m.live &&
-          m.ticks.length >= 100 &&
-          m.prediction == null) {
-        _predict(m);
-      }
-    }
-
-    if (mounted) setState(() {});
+  void _scan() {
+    for(final m in markets) { _predict(m); }
+    if(mounted) setState((){});
   }
-
-  void _settle(Market m) {
-    if (m.prediction == null ||
-        m.predictionDeadline == null ||
-        m.predictedEpoch == null) {
-      return;
-    }
-
-    final deadline =
-        m.predictionDeadline!.millisecondsSinceEpoch ~/ 1000;
-
-    if (m.ticks.last.epoch < deadline ||
-        m.ticks.last.epoch <= m.predictedEpoch!) {
-      return;
-    }
-
-    final eligible = m.ticks.where((t) => t.epoch >= deadline && t.epoch > m.predictedEpoch!).toList();
-    if (eligible.isEmpty) return;
-    final tick = eligible.first;
-    if (m.lastSettledEpoch == tick.epoch) return;
-    m.lastSettledEpoch = tick.epoch;
-
-    final predicted = m.prediction!;
-    final observed = tick.digit;
-    final mode = m.predictionStrategy;
-
-    final correct = switch (mode) {
-      0 => observed == predicted,
-      1 => observed.isEven == predicted.isEven,
-      _ => observed > predicted,
+  void _settle(Market m,V13Tick tick) {
+    final f=m.forecast;
+    if(f==null || tick.epoch<=f.sourceEpoch) return;
+    // A genuine NEXT-TICK forecast: score the first subsequent live tick.
+    final actual=tick.lastDigit;
+    final correct=switch(f.strategy) {
+      0 => actual==f.digit,
+      1 => actual.isEven==f.digit.isEven,
+      _ => actual>f.digit,
     };
-
-    observations.insert(
-      0,
-      Observation(
-        m.symbol,
-        ['Matches', 'Even/Odd', 'Over/Under'][mode],
-        predicted,
-        observed,
-        tick.epoch,
-        correct,
-      ),
-    );
-
-    if (observations.length > 300) {
-      observations.removeLast();
+    results.insert(0,Result(m.symbol,modes[f.strategy],f.digit,actual,tick.epoch,correct));
+    if(results.length>300) results.removeLast();
+    if(notifications) {
+      alerts.insert(0,'${m.name}: ${correct?'CORRECT':'INCORRECT'} ${f.digit} → $actual');
+      if(alerts.length>80) alerts.removeLast();
     }
-
-    if (sound) {
-      _addAlert(
-        '${m.name}: ${correct ? 'CORRECT' : 'INCORRECT'}'
-        ' • $predicted → $observed',
-      );
-    }
-
-    m.prediction = null;
-    m.predictedEpoch = null;
-    m.predictionDeadline = null;
-
+    m.forecast=null;
     _save();
   }
-
-  @override
-  void dispose() {
-    tokenController.dispose();
-    barrierController.dispose();
-    stakeController.dispose();
-    clock?.cancel();
-    reconnect?.cancel();
-    heartbeat?.cancel();
-    subscription?.cancel();
-    channel?.sink.close();
-    super.dispose();
-  }
-
-  Widget _card(
-    Widget child, {
-    EdgeInsets padding = const EdgeInsets.all(16),
-  }) =>
-      Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        padding: padding,
-        decoration: BoxDecoration(
-          color: panel,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: blue.withOpacity(.5)),
-        ),
-        child: child,
-      );
-
-  Widget _pill(String text, {Color color = cyan}) => Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: 9,
-          vertical: 5,
-        ),
-        decoration: BoxDecoration(
-          color: color.withOpacity(.15),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Text(
-          text,
-          style: TextStyle(
-            color: color,
-            fontSize: 11,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      );
-
-  Widget _metric(String value, String label) => Expanded(
-        child: _card(
-          Column(
-            children: [
-              Text(
-                value,
-                style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: cyan,
-                ),
-              ),
-              Text(
-                label,
-                style: const TextStyle(fontSize: 10),
-              ),
-            ],
-          ),
-        ),
-      );
-
+  List<Result> _filtered({String? symbol,String? mode}) => results.where((r)=>(symbol==null||r.symbol==symbol)&&(mode==null||r.mode==mode)).toList();
+  String _rate(List<Result> xs) => xs.isEmpty?'—':'${(100*xs.where((r)=>r.correct).length/xs.length).toStringAsFixed(1)}%';
+  Widget _card(Widget child) => Container(margin:const EdgeInsets.only(bottom:12),padding:const EdgeInsets.all(15),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(16),border:Border.all(color:blue.withOpacity(.45))),child:child);
+  Widget _pill(String value,{Color color=cyan}) => Container(padding:const EdgeInsets.symmetric(horizontal:10,vertical:6),decoration:BoxDecoration(color:color.withOpacity(.15),borderRadius:BorderRadius.circular(16)),child:Text(value,style:TextStyle(color:color,fontSize:11,fontWeight:FontWeight.bold)));
+  Widget _metric(String value,String label) => Expanded(child:_card(Column(children:[Text(value,style:const TextStyle(fontSize:21,fontWeight:FontWeight.bold,color:cyan)),Text(label,style:const TextStyle(fontSize:10))])));
   Widget _marketCard(Market m) {
-    final n = m.prediction;
-
-    return _card(
-      Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  m.name,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-              _pill(
-                m.live ? '● LIVE' : '● WAIT',
-                color: m.live ? green : Colors.orange,
-              ),
-            ],
-          ),
-          Text(
-            m.symbol,
-            style: const TextStyle(color: Colors.white60),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  children: [
-                    const Text(
-                      'NEXT DIGIT',
-                      style: TextStyle(fontSize: 10),
-                    ),
-                    Container(
-                      width: 72,
-                      height: 72,
-                      alignment: Alignment.center,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: LinearGradient(
-                          colors: [blue, cyan],
-                        ),
-                      ),
-                      child: Text(
-                        n?.toString() ?? '⌛',
-                        style: const TextStyle(
-                          fontSize: 36,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                flex: 2,
-                child: Column(
-                  children: [
-                    Text(
-                      n == null
-                          ? 'COLLECTING'
-                          : 'Model ${m.nextDigitEstimate.toStringAsFixed(1)}% (uncalibrated)',
-                      style: const TextStyle(
-                        color: Colors.amber,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      n == null
-                          ? 'WAITING FOR DATA'
-                          : 'NEXT SCAN IN ${remaining}s',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 7),
-                    Text(
-                      'Trend: ${m.trend} • ${m.ticks.length} ticks',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.white70,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 7),
-          const Text(
-            'Historical frequency is not a verified win probability.',
-            style: TextStyle(
-              fontSize: 10,
-              color: Colors.white54,
-            ),
-          ),
-        ],
-      ),
-    );
+    final f=m.forecast;
+    return _card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      Row(children:[Expanded(child:Text(m.name,style:const TextStyle(fontSize:17,fontWeight:FontWeight.bold))),_pill(m.live?'● LIVE':'● WAIT',color:m.live?green:Colors.orange)]),
+      Text(m.symbol,style:const TextStyle(color:Colors.white60)),const SizedBox(height:12),
+      Row(children:[Container(width:70,height:70,alignment:Alignment.center,decoration:const BoxDecoration(shape:BoxShape.circle,gradient:LinearGradient(colors:[blue,cyan])),child:Text(f?.digit.toString()??'⌛',style:const TextStyle(fontSize:33,fontWeight:FontWeight.bold))),const SizedBox(width:16),
+        Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(f==null?'NEXT DIGIT • WAITING':'NEXT DIGIT • ${f.digit}',style:const TextStyle(fontWeight:FontWeight.bold)),Text(f==null?'Awaiting scan':'Model score ${f.estimate.toStringAsFixed(1)}% (uncalibrated)',style:const TextStyle(fontSize:12,color:Colors.amber)),Text('Trend ${m.trend} • ${m.ticks.length} ticks',style:const TextStyle(fontSize:12))]))]),
+      const SizedBox(height:8),Text('Holdout: ${m.testCount==0?'collecting':'${m.holdout.toStringAsFixed(1)}% (${m.testCount} tests)'} • ${m.method}',style:const TextStyle(fontSize:11,color:Colors.white70)),
+    ]));
   }
-
-  // V12.1: Results are observations, never broker trade outcomes.
-  List<Observation> _filteredResults({String? symbol, String? mode}) =>
-      observations.where((o) =>
-        (symbol == null || o.symbol == symbol) &&
-        (mode == null || o.strategy == mode)).toList();
-
-  String _successRate(List<Observation> sample) => sample.isEmpty
-      ? '—'
-      : '${(100 * sample.where((o) => o.correct).length / sample.length).toStringAsFixed(1)}%';
-
-  Widget _successMonitor() {
-    final selectedMode = ['Matches', 'Even/Odd', 'Over/Under'][strategy];
-    final selected = _filteredResults(mode: selectedMode);
-    final correct = selected.where((o) => o.correct).length;
-    Widget window(int size) {
-      final sample = selected.take(size).toList();
-      return Expanded(child: _metric(_successRate(sample),
-          'LAST $size (${sample.length})'));
-    }
-    return _card(Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text('Prediction Success Monitor',
-          style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 5),
-        Text('$selectedMode • observed outcomes, not trading wins',
-          style: const TextStyle(color: Colors.white70, fontSize: 12)),
-        const SizedBox(height: 10),
-        Row(children: [
-          _metric(_successRate(selected), 'SUCCESS RATE'),
-          const SizedBox(width: 7),
-          _metric('${selected.length}', 'OBSERVATIONS'),
-        ]),
-        Row(children: [
-          _metric('$correct', 'CORRECT'),
-          const SizedBox(width: 7),
-          _metric('${selected.length - correct}', 'INCORRECT'),
-        ]),
-        Row(children: [window(10), const SizedBox(width: 5), window(50)]),
-        Row(children: [window(100), const SizedBox(width: 5), window(300)]),
-        const SizedBox(height: 10),
-        const SizedBox(height: 10),
-        const Text('Next-digit forecast (experimental)',
-          style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 5),
-        ...markets.map((m) => Padding(
-          padding: const EdgeInsets.symmetric(vertical: 3),
-          child: Row(children: [
-            Expanded(child: Text(m.name, style: const TextStyle(fontSize: 12))),
-            Text(m.prediction == null ? 'Collecting' :
-              'Digit ${m.prediction} • model ${m.nextDigitEstimate.toStringAsFixed(1)}%',
-              style: const TextStyle(fontSize: 12, color: cyan)),
-          ]),
-        )),
-        const Text('Experimental next-digit forecasts; model percentages are uncalibrated. '
-          'Walk-forward results are observational, not broker trade win rates.',
-          style: TextStyle(color: Colors.white60, fontSize: 11)),
-        const SizedBox(height: 10),
-        const SizedBox(height: 12),
-        const Text('V12.4 ML Matches Analyzer',
-          style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 6),
-        ...markets.map((m) => Padding(
-          padding: const EdgeInsets.symmetric(vertical: 5),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('${m.name} • ${m.predictionMethod}',
-              style: const TextStyle(fontSize: 12)),
-            Text(m.validationSamples == 0
-              ? 'Collecting validation data'
-              : 'Backtest: ${m.validatedAccuracy.toStringAsFixed(1)}% '
-                '(${m.validationSamples} tests) • fixed-digit baseline '
-                '${m.baselineAccuracy.toStringAsFixed(1)}% • '
-                '${m.signalQualified ? "EXPERIMENTAL EDGE" : "NO RELIABLE SIGNAL"}',
-              style: TextStyle(fontSize: 11,
-                color: m.signalQualified ? green : Colors.amber)),
-          ]),
-        )),
-        const Text('Models are selected on the same rolling historical data used '
-          'to report their scores, so these results may be optimistic. '
-          'Forward live observations below are the stronger evidence. '
-          'An experimental edge is not a validated trading advantage.',
-          style: TextStyle(color: Colors.white60, fontSize: 11)),
-        const SizedBox(height: 10),
-        const SizedBox(height: 12),
-        const Text('ML Matches — chronological holdout',
-          style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 5),
-        ...markets.map((m) => Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Text('${m.name}: ML ${m.mlAccuracy.toStringAsFixed(1)}% '
-            'vs digit-0 baseline ${m.mlBaseline.toStringAsFixed(1)}% '
-            '(${m.mlTestCount} unseen tests)',
-            style: const TextStyle(fontSize: 11)),
-        )),
-        const Text('ML is trained on older ticks and tested on later ticks. '
-          'Scores are exploratory and may not generalize. '
-          'Predictions are observations, not trading advice.',
-          style: TextStyle(fontSize: 11, color: Colors.white60)),
-        const SizedBox(height: 10),
-        const Text('Success by market',
-          style: TextStyle(fontWeight: FontWeight.bold)),
-        ...markets.map((m) {
-          final sample = _filteredResults(symbol: m.symbol, mode: selectedMode);
-          final successes = sample.where((o) => o.correct).length;
-          return Padding(
-            padding: const EdgeInsets.symmetric(vertical: 5),
-            child: Row(children: [
-              Expanded(child: Text(m.name, style: const TextStyle(fontSize: 12))),
-              Text('$successes/${sample.length}  ${_successRate(sample)}',
-                style: const TextStyle(fontSize: 12)),
-            ]),
-          );
-        }),
-        const SizedBox(height: 5),
-        const Text('Each percentage uses only settled observations for the selected strategy. '
-          'Model estimates are not verified win probabilities. '
-          'Small samples are unreliable; outcomes do not establish profitability.',
-          style: TextStyle(color: Colors.white60, fontSize: 11)),
-      ],
-    ));
-  }
-
   Widget _radar() {
-    final valid = markets.where((m) => m.live).length;
-    final strategyResults = _filteredResults(
-      mode: ['Matches', 'Even/Odd', 'Over/Under'][strategy]);
-    final accuracy = strategyResults.isEmpty
-        ? null
-        : 100 * strategyResults.where((o) => o.correct).length /
-            strategyResults.length;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            _pill(
-              status,
-              color: status == 'PUBLIC LIVE'
-                  ? green
-                  : Colors.orange,
-            ),
-            const Spacer(),
-            Text('$valid/${markets.length} feeds'),
-          ],
-        ),
-        const SizedBox(height: 14),
-        const Text(
-          'Volatility Predictions',
-          style: TextStyle(
-            fontSize: 25,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        const Text(
-          'Live digit observations across Volatility Indices',
-          style: TextStyle(
-            color: Colors.white70,
-            fontSize: 12,
-          ),
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 6,
-          children: List.generate(
-            3,
-            (i) => ChoiceChip(
-              label: Text(
-                ['Matches', 'Even / Odd', 'Over / Under'][i],
-              ),
-              selected: strategy == i,
-              onSelected: (_) {
-                setState(() => strategy = i);
-              },
-            ),
-          ),
-        ),
-        const SizedBox(height: 12),
-        _successMonitor(),
-        Row(
-          children: [
-            _metric(
-              accuracy == null
-                  ? '—'
-                  : '${accuracy.toStringAsFixed(1)}%',
-              'OBSERVED ACCURACY',
-            ),
-            const SizedBox(width: 7),
-            _metric(
-              '${strategyResults.length}',
-              'OBSERVATIONS',
-            ),
-          ],
-        ),
-        Row(
-          children: [
-            _metric('$valid', 'LIVE FEEDS'),
-            const SizedBox(width: 7),
-            _metric(
-              '${markets.where((m) => m.prediction != null).length}',
-              'ANALYZING',
-            ),
-          ],
-        ),
-        Row(
-          children: [
-            const Text(
-              'All markets',
-              style: TextStyle(
-                fontSize: 19,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const Spacer(),
-            IconButton(
-              onPressed: () => setState(() => grid = !grid),
-              icon: Icon(
-                grid ? Icons.view_agenda : Icons.grid_view,
-              ),
-            ),
-            Switch(
-              value: autoScan,
-              onChanged: (v) {
-                setState(() => autoScan = v);
-                _save();
-              },
-            ),
-          ],
-        ),
-        ...markets.map(_marketCard),
-      ],
-    );
+    final sample=_filtered(mode:modes[strategy]);
+    return Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      Row(children:[_pill(connection,color:data.connected?green:Colors.orange),const Spacer(),Text('${markets.where((m)=>m.live).length}/10 feeds')]),
+      const SizedBox(height:15),const Text('Volatility Predictions',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),
+      const Text('Experimental NEXT-TICK digit forecasts',style:TextStyle(fontSize:12,color:Colors.white70)),
+      Wrap(spacing:6,children:List.generate(3,(i)=>ChoiceChip(label:Text(modes[i]),selected:strategy==i,onSelected:(_)=>setState(()=>strategy=i)))),
+      const SizedBox(height:12),Row(children:[_metric(_rate(sample),'OBSERVED ACCURACY'),const SizedBox(width:8),_metric('${sample.length}','OBSERVATIONS')]),
+      Row(children:[_metric('${markets.where((m)=>m.live).length}','LIVE FEEDS'),const SizedBox(width:8),_metric('${markets.where((m)=>m.forecast!=null).length}','PENDING')]),
+      _card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Matches Success Monitor',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),const SizedBox(height:7),
+        for(final n in [10,50,100,300]) Text('Last $n: ${_rate(sample.take(n).toList())} (${min(n,sample.length)} observations)'),
+        const SizedBox(height:8),const Text('Model scores are not win probabilities. Random-digit Matches has an approximately 10% chance baseline.',style:TextStyle(fontSize:11,color:Colors.white60))])),
+      Row(children:[const Text('All markets',style:TextStyle(fontSize:19,fontWeight:FontWeight.bold)),const Spacer(),const Text('AUTO'),Switch(value:autoScan,onChanged:(v){setState(()=>autoScan=v);_save();})]),
+      ...markets.map(_marketCard)
+    ]);
   }
-
   Widget _analyzer() {
-    final m = markets.firstWhere(
-      (m) => m.symbol == selected,
-    );
-
-    final counts = List.generate(
-      10,
-      (i) => m.ticks.where((x) => x.digit == i).length,
-    );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Expert Analyzer',
-          style: TextStyle(
-            fontSize: 25,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        _card(
-          DropdownButton<String>(
-            isExpanded: true,
-            value: selected,
-            items: markets
-                .map(
-                  (m) => DropdownMenuItem(
-                    value: m.symbol,
-                    child: Text(m.name),
-                  ),
-                )
-                .toList(),
-            onChanged: (s) {
-              if (s != null) {
-                setState(() => selected = s);
-              }
-            },
-          ),
-        ),
-        _card(
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      m.name,
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  _pill(
-                    m.live ? 'LIVE' : 'WAIT',
-                    color: m.live ? green : Colors.orange,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Trend: ${m.trend}',
-                style: const TextStyle(
-                  fontSize: 22,
-                  color: cyan,
-                ),
-              ),
-              Text(
-                'Last digit: ${m.lastDigit ?? '—'} • ${m.ticks.length} ticks',
-              ),
-              Text('Tick RSI: ${m.rsi?.toStringAsFixed(1) ?? '—'} • MACD: ${m.macd?.toStringAsFixed(5) ?? '—'}'),
-              Text('Mean tick movement: ${m.atr?.toStringAsFixed(5) ?? '—'}'),
-              const Text('Tick indicators only; not closed-candle or validated win probability.', style: TextStyle(fontSize: 11, color: Colors.white60)),
-              const SizedBox(height: 16),
-              SizedBox(
-                height: 100,
-                child: CustomPaint(
-                  painter: SparkPainter(
-                    m.ticks.map((e) => e.quote).toList(),
-                  ),
-                  child: const SizedBox.expand(),
-                ),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                'Live tick chart (not closed candles)',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.white60,
-                ),
-              ),
-            ],
-          ),
-        ),
-        _card(
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Digit Distribution',
-                style: TextStyle(
-                  fontSize: 19,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              for (int i = 0; i < 10; i++)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 5),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 20,
-                        child: Text('$i'),
-                      ),
-                      Expanded(
-                        child: LinearProgressIndicator(
-                          value: m.ticks.isEmpty
-                              ? 0
-                              : counts[i] / m.ticks.length,
-                          color: cyan,
-                          minHeight: 8,
-                          backgroundColor: Colors.white12,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      SizedBox(
-                        width: 52,
-                        child: Text(
-                          m.ticks.isEmpty
-                              ? '—'
-                              : '${(counts[i] * 100 / m.ticks.length).toStringAsFixed(1)}%',
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-          ),
-        ),
-        FilledButton(
-          onPressed: () {
-            setState(() => _predict(m));
-          },
-          child: const Text('REFRESH ANALYSIS'),
-        ),
-      ],
-    );
+    final m=market(selected);
+    final counts=List<int>.generate(10,(d)=>m.ticks.where((t)=>t.lastDigit==d).length);
+    return Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      const Text('Expert Analyzer',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),
+      _card(DropdownButton<String>(isExpanded:true,value:selected,items:markets.map((m)=>DropdownMenuItem(value:m.symbol,child:Text(m.name))).toList(),onChanged:(v){if(v!=null)setState(()=>selected=v);})),
+      _card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[Expanded(child:Text(m.name,style:const TextStyle(fontSize:19,fontWeight:FontWeight.bold))),_pill(m.live?'LIVE':'WAIT',color:m.live?green:Colors.orange)]),
+        Text('Trend: ${m.trend}',style:const TextStyle(fontSize:21,color:cyan)),
+        Text('Last digit: ${m.lastDigit??'—'} • ${m.ticks.length} ticks'),
+        Text('Tick RSI: ${m.rsi?.toStringAsFixed(1)??'—'} • MACD: ${m.macd?.toStringAsFixed(5)??'—'}'),
+        Text('Mean tick movement: ${m.movement?.toStringAsFixed(5)??'—'}'),
+        const SizedBox(height:10),SizedBox(height:100,child:CustomPaint(painter:SparkPainter(m.ticks.map((t)=>t.price).toList()),child:const SizedBox.expand())),
+        const Text('Tick chart; indicators are not closed-candle signals.',style:TextStyle(fontSize:11,color:Colors.white60))])),
+      _card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Digit Distribution',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),
+        for(var d=0;d<10;d++) Padding(padding:const EdgeInsets.symmetric(vertical:4),child:Row(children:[SizedBox(width:24,child:Text('$d')),Expanded(child:LinearProgressIndicator(value:m.ticks.isEmpty?0:counts[d]/m.ticks.length,minHeight:8,color:cyan)),const SizedBox(width:10),Text(m.ticks.isEmpty?'—':'${(counts[d]*100/m.ticks.length).toStringAsFixed(1)}%')]))])),
+      _card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Prediction / Validation',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold)),
+        Text('Next digit: ${m.forecast?.digit??'—'}'),Text('Model: ${m.method}'),
+        Text('Holdout accuracy: ${m.testCount==0?'—':'${m.holdout.toStringAsFixed(1)}%'}'),
+        Text('Fixed-digit baseline: ${m.testCount==0?'—':'${m.baseline.toStringAsFixed(1)}%'}'),
+        Text('Unseen tests: ${m.testCount}'),Text('Forward Matches: ${_rate(_filtered(symbol:m.symbol,mode:'Matches'))}'),
+        const Text('Holdout is historical; live forward accuracy is the stronger measure.',style:TextStyle(fontSize:11,color:Colors.white60))])),
+      FilledButton(onPressed:(){_predict(m);setState((){});},child:const Text('PREDICT NEXT TICK'))
+    ]);
   }
-
-  Widget _trades() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-    const Text('Demo Orders', style: TextStyle(fontSize: 25, fontWeight: FontWeight.bold)),
-    _card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('Account: $accountStatus'), Text('Order: $orderState'),
-      if (contractRecoveryPending || purchaseUnconfirmed) const Text('Trading locked: verify unresolved purchase in Deriv before restarting.', style: TextStyle(color: Colors.amber)),
-      Text('Session P/L: ${sessionProfit.toStringAsFixed(2)} $currency'),
-      Text('Trades: $tradesPlaced/6 • Consecutive losses: $consecutiveLosses/2'),
-      if (!demoAuthorized) const Text('DEMO authorization required. Real accounts are read-only.',
-        style: TextStyle(color: Colors.amber)),
-      DropdownButton<String>(isExpanded: true, value: selected,
-        items: markets.map((m) => DropdownMenuItem(value: m.symbol, child: Text(m.name))).toList(),
-        onChanged: openContractId == null ? (v) { if (v != null) setState(() => selected = v); } : null),
-      DropdownButton<String>(isExpanded: true, value: orderType,
-        items: const [
-          DropdownMenuItem(value: 'DIGITMATCH', child: Text('Matches')),
-          DropdownMenuItem(value: 'DIGITDIFF', child: Text('Differs')),
-          DropdownMenuItem(value: 'DIGITEVEN', child: Text('Even')),
-          DropdownMenuItem(value: 'DIGITODD', child: Text('Odd')),
-          DropdownMenuItem(value: 'DIGITOVER', child: Text('Over')),
-          DropdownMenuItem(value: 'DIGITUNDER', child: Text('Under')),
-        ], onChanged: (v) { if (v != null) setState(() => orderType = v); }),
-      TextField(controller: barrierController, keyboardType: TextInputType.number,
-        decoration: const InputDecoration(labelText: 'Barrier digit (0–9; when applicable)')),
-      TextField(controller: stakeController, keyboardType: const TextInputType.numberWithOptions(decimal: true),
-        decoration: const InputDecoration(labelText: 'Stake (USD; minimum 0.35)')),
-      const SizedBox(height: 10),
-      FilledButton(onPressed: canOrder ? _requestProposal : null,
-        child: const Text('GET PROPOSAL → CONFIRM DEMO BUY')),
-      const Text('10 ticks duration. Broker may reject unsupported contracts. '
-        'No automated purchases; purchase requires confirmation.',
-        style: TextStyle(fontSize: 11, color: Colors.white60)),
-    ])),
-    ...orderHistory.take(30).map((x) => _card(Text(x))),
-  ]);
-
-  Widget _history() => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Observation History',
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          ...observations.take(100).map(
-                (o) => _card(
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${o.symbol} • ${o.strategy} • '
-                        '${o.correct ? 'CORRECT' : 'INCORRECT'}',
-                        style: TextStyle(
-                          color: o.correct ? green : red,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      Text(
-                        'Predicted ${o.predicted} • '
-                        'Observed ${o.observed} • '
-                        'Epoch ${o.epoch}',
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-        ],
-      );
-
-  Widget _journal() {
-    final wins = observations.where((x) => x.correct).length;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Trading Journal',
-          style: TextStyle(
-            fontSize: 25,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        Row(
-          children: [
-            _metric('${observations.length}', 'TOTAL'),
-            const SizedBox(width: 6),
-            _metric('$wins', 'CORRECT'),
-            const SizedBox(width: 6),
-            _metric(
-              '${observations.length - wins}',
-              'INCORRECT',
-            ),
-          ],
-        ),
-        _card(
-          Text(
-            'Observed accuracy: '
-            '${observations.isEmpty ? 'Not measured' : '${(wins * 100 / observations.length).toStringAsFixed(1)}%'}'
-            '\nObservations are not broker trades.',
-          ),
-        ),
-        _card(
-          TextField(
-            controller: TextEditingController(text: note)
-              ..selection = TextSelection.collapsed(
-                offset: note.length,
-              ),
-            maxLines: 4,
-            decoration: const InputDecoration(
-              labelText: 'Your notes',
-              hintText: 'Write a trading observation...',
-            ),
-            onChanged: (v) => note = v,
-          ),
-        ),
-        FilledButton(
-          onPressed: () async {
-            final p = await SharedPreferences.getInstance();
-            await p.setString('journalNote', note);
-
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Note saved locally'),
-                ),
-              );
-            }
-          },
-          child: const Text('SAVE NOTE'),
-        ),
-      ],
-    );
+  Widget _trades() => Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Demo Orders',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),
+    _card(const Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('PUBLIC DATA ONLY',style:TextStyle(color:Colors.amber,fontWeight:FontWeight.bold)),SizedBox(height:8),
+      Text('Broker orders are locked. The public market-data socket cannot authenticate a demo account or place trades.'),SizedBox(height:8),
+      Text('A separate PAT/OAuth → account ID → OTP → authenticated DEMO WebSocket flow is required before enabling purchase.'),SizedBox(height:8),
+      Text('Planned risk limits: $0.35 stake • 6 trades • 2 consecutive losses • session P/L −$1 to +$1 • daily loss $2.'),SizedBox(height:8),
+      Text('No real-money trading or automatic purchases.',style:TextStyle(color:Colors.white70))]))]);
+  Widget _history() => Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Observation History',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),
+    ...results.take(100).map((r)=>_card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('${r.symbol} • ${r.mode} • ${r.correct?'CORRECT':'INCORRECT'}',style:TextStyle(color:r.correct?green:red,fontWeight:FontWeight.bold)),Text('${r.predicted} → ${r.actual} • ${r.epoch}')])))]);
+  Widget _journal() => Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Trading Journal',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),
+    Row(children:[_metric('${results.length}','OBSERVATIONS'),const SizedBox(width:8),_metric(_rate(results),'ACCURACY')]),
+    _card(TextField(controller:journal,maxLines:5,decoration:const InputDecoration(labelText:'Your notes'))),
+    FilledButton(onPressed:()async{await _save();if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Saved locally')));},child:const Text('SAVE NOTE'))]);
+  Widget _alerts() => Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Alerts',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),
+    _card(SwitchListTile(title:const Text('In-app observation alerts'),value:notifications,onChanged:(v){setState(()=>notifications=v);_save();})),...alerts.map((a)=>_card(Text(a)))]);
+  Widget _settings() => Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Settings',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),
+    _card(Column(children:[SwitchListTile(title:const Text('Automatic scanning'),value:autoScan,onChanged:(v){setState(()=>autoScan=v);_save();}),
+      SwitchListTile(title:const Text('In-app alerts'),value:notifications,onChanged:(v){setState(()=>notifications=v);_save();}),
+      const ListTile(title:Text('Connection'),subtitle:Text('Deriv public Options WebSocket • automatic reconnect')),
+      const ListTile(title:Text('Trading mode'),subtitle:Text('Read-only scanner • demo orders disabled'))])),
+    FilledButton(onPressed:() {data.connect();setState(()=>connection='CONNECTING');},child:const Text('RECONNECT MARKET FEED'))]);
+  Widget _diagnostics() => Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Connection Diagnostics',style:TextStyle(fontSize:24,fontWeight:FontWeight.bold)),
+    _card(Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('Socket: $connection'),const Text('Account: PUBLIC DATA ONLY'),Text('Ticks received: $tickCount'),
+      Text('Feeds live: ${markets.where((m)=>m.live).length}/10'),Text('Scan countdown: ${scanRemaining}s'),
+      const Text('No PAT or account token is sent to the public endpoint.') ])),
+    Row(children:[Expanded(child:OutlinedButton(onPressed:()=>data.connect(),child:const Text('RECONNECT'))),const SizedBox(width:8),Expanded(child:OutlinedButton(onPressed:()=>setState(()=>logs.clear()),child:const Text('CLEAR LOG')))]),
+    ...logs.take(100).map((line)=>Padding(padding:const EdgeInsets.symmetric(vertical:3),child:SelectableText(line,style:const TextStyle(fontSize:11,fontFamily:'monospace'))))]);
+  @override Widget build(BuildContext context) {
+    final pages=[_radar,_analyzer,_trades,_history,_journal,_alerts,_settings,_diagnostics];
+    const names=['Radar','Analyzer','Trades','History','Journal','Alerts','Settings','Logs'];
+    const icons=[Icons.radar,Icons.bar_chart,Icons.swap_horiz,Icons.history,Icons.article_outlined,Icons.notifications_outlined,Icons.settings_outlined,Icons.terminal];
+    return Scaffold(appBar:AppBar(backgroundColor:panel,title:const Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('V13 Expert Trader PRO',style:TextStyle(fontSize:19,fontWeight:FontWeight.bold)),Text('Deriv • Experimental market scanner',style:TextStyle(fontSize:11,color:Colors.white70))]),actions:[Padding(padding:const EdgeInsets.only(right:10),child:Center(child:_pill('PUBLIC DATA',color:green)))]),
+      body:SafeArea(child:Column(children:[Expanded(child:ListView(padding:const EdgeInsets.all(14),children:[pages[tab]()])),
+        Container(height:69,color:panel,child:ListView.builder(scrollDirection:Axis.horizontal,itemCount:names.length,itemBuilder:(context,i)=>InkWell(onTap:()=>setState(()=>tab=i),child:Container(width:max(66.0,MediaQuery.sizeOf(context).width/6.2),padding:const EdgeInsets.symmetric(vertical:7),decoration:BoxDecoration(color:tab==i?blue.withOpacity(.2):Colors.transparent,borderRadius:BorderRadius.circular(12)),child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[Icon(icons[i],size:22,color:tab==i?cyan:Colors.white70),const SizedBox(height:3),Text(names[i],style:TextStyle(fontSize:10,color:tab==i?cyan:Colors.white70))])))))])));
   }
-
-  Widget _alerts() => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Alerts',
-            style: TextStyle(
-              fontSize: 25,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          _card(
-            SwitchListTile(
-              title: const Text('Observation alerts'),
-              subtitle: const Text(
-                'Local result notifications in the app',
-              ),
-              value: sound,
-              onChanged: (v) {
-                setState(() => sound = v);
-                _save();
-              },
-            ),
-          ),
-          ...alerts.take(80).map(
-                (a) => _card(Text(a)),
-              ),
-        ],
-      );
-
-  Widget _diagnostics() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      const Text('Connection Diagnostics', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-      _card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Socket: $status'), Text('Account: $accountStatus'),
-        Text('Account ID: ${accountId.isEmpty ? '—' : accountId}'),
-        Text('Balance: $balanceText'), Text('Ticks received: $tickCount'),
-        Text('Reconnect attempts: $reconnectAttempts'),
-        Text('Unresolved purchase: $purchaseUnconfirmed • Recovery lock: $contractRecoveryPending'),
-        Text('Last tick: ${lastTick?.toIso8601String() ?? 'Never'}'),
-      ])),
-      _card(Column(children: [
-        const Text('Public market data connection. Demo account login and trading are disabled until OTP authentication is integrated.'),
-      ])),
-      Row(children: [
-        Expanded(child: OutlinedButton(onPressed: () { reconnect?.cancel(); _reconnect(); if (!autoReconnect) _connect(); }, child: const Text('RECONNECT'))),
-        const SizedBox(width: 8),
-        Expanded(child: OutlinedButton(onPressed: () { setState(() => diagnosticLogs.clear()); }, child: const Text('CLEAR LOG'))),
-      ]),
-      ...diagnosticLogs.take(100).map((line) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: SelectableText(line, style: const TextStyle(fontSize: 11, fontFamily: 'monospace')))),
-    ],
-  );
-
-  Widget _settings() => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Settings',
-            style: TextStyle(
-              fontSize: 25,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          _card(
-            Column(
-              children: [
-                SwitchListTile(
-                  title: const Text('Automatic scanning'),
-                  value: autoScan,
-                  onChanged: (v) {
-                    setState(() => autoScan = v);
-                    _save();
-                  },
-                ),
-                SwitchListTile(
-                  title: const Text('Auto reconnect'),
-                  value: autoReconnect,
-                  onChanged: (v) {
-                    setState(() => autoReconnect = v);
-                    _save();
-                  },
-                ),
-                SwitchListTile(
-                  title: const Text('In-app alerts'),
-                  value: sound,
-                  onChanged: (v) {
-                    setState(() => sound = v);
-                    _save();
-                  },
-                ),
-                const ListTile(
-                  title: Text('Market feed'),
-                  subtitle: Text(
-                    'Deriv public WebSocket • app_id 1089',
-                  ),
-                ),
-                const ListTile(
-                  title: Text('Trading mode'),
-                  subtitle: Text(
-                    'Public scanning; demo orders require verified demo authorization',
-                  ),
-                ),
-              ],
-            ),
-          ),
-          FilledButton(
-            onPressed: () {
-              reconnect?.cancel();
-              _reconnect();
-              if (!autoReconnect) _connect();
-            },
-            child: const Text('RECONNECT MARKET FEED'),
-          ),
-        ],
-      );
-
-  @override
-  Widget build(BuildContext context) {
-    final pages = <Widget Function()>[
-      _radar,
-      _analyzer,
-      _trades,
-      _history,
-      _journal,
-      _alerts,
-      _settings,
-      _diagnostics,
-    ];
-
-    final names = [
-      'Radar',
-      'Analyzer',
-      'Trades',
-      'History',
-      'Journal',
-      'Alerts',
-      'Settings',
-      'Logs',
-    ];
-
-    final icons = [
-      Icons.radar,
-      Icons.bar_chart,
-      Icons.swap_horiz,
-      Icons.history,
-      Icons.article_outlined,
-      Icons.notifications_outlined,
-      Icons.settings_outlined,
-      Icons.terminal,
-    ];
-
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: panel,
-        title: const Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'V12.4 Expert Trader PRO',
-              style: TextStyle(
-                fontSize: 19,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            Text(
-              'Deriv • Demo market scanner',
-              style: TextStyle(
-                fontSize: 11,
-                color: Colors.white70,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 10),
-            child: Center(
-              child: _pill(
-                accountStatus == 'DEMO AUTHENTICATED' ? 'DEMO' : 'PUBLIC DATA',
-                color: green,
-              ),
-            ),
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.all(14),
-                children: [pages[tab]()],
-              ),
-            ),
-            Container(
-              height: 69,
-              decoration: BoxDecoration(
-                color: panel,
-                border: Border(
-                  top: BorderSide(
-                    color: blue.withOpacity(.4),
-                  ),
-                ),
-              ),
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: names.length,
-                itemBuilder: (context, i) => InkWell(
-                  onTap: () {
-                    setState(() => tab = i);
-                  },
-                  child: Container(
-                    width: MediaQuery.sizeOf(context).width / 6.2,
-                    padding: const EdgeInsets.symmetric(vertical: 7),
-                    decoration: BoxDecoration(
-                      color: tab == i
-                          ? blue.withOpacity(.2)
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          icons[i],
-                          size: 22,
-                          color: tab == i
-                              ? cyan
-                              : Colors.white70,
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          names[i],
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: tab == i
-                                ? cyan
-                                : Colors.white70,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  @override void dispose() { clock?.cancel();for(final s in subscriptions){s.cancel();}data.dispose();journal.dispose();super.dispose(); }
 }
-
 class SparkPainter extends CustomPainter {
   final List<double> values;
-
   SparkPainter(this.values);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (values.length < 2) return;
-
-    final a = values.length > 80
-        ? values.sublist(values.length - 80)
-        : values;
-
-    final lo = a.reduce(min);
-    final hi = a.reduce(max);
-    final range = max(hi - lo, .00001);
-
-    final path = Path();
-
-    for (var i = 0; i < a.length; i++) {
-      final x = i * size.width / (a.length - 1);
-      final y = size.height -
-          (a[i] - lo) / range * size.height;
-
-      if (i == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
+  @override void paint(Canvas canvas,Size size) {
+    if(values.length<2)return;
+    final a=values.length>80?values.sublist(values.length-80):values;
+    final lo=a.reduce(min),hi=a.reduce(max),range=max(hi-lo,.00001);
+    final path=Path();
+    for(var i=0;i<a.length;i++) {
+      final x=i*size.width/(a.length-1),y=size.height-(a[i]-lo)/range*size.height;
+      if(i==0)path.moveTo(x,y);else path.lineTo(x,y);
     }
-
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = cyan
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2,
-    );
+    canvas.drawPath(path,Paint()..color=cyan..style=PaintingStyle.stroke..strokeWidth=2);
   }
-
-  @override
-  bool shouldRepaint(covariant SparkPainter old) => true;
+  @override bool shouldRepaint(covariant SparkPainter old)=>true;
 }
