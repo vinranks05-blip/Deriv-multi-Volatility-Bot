@@ -18,7 +18,8 @@ class V13Tick {
 }
 
 class V13MarketData {
-  V13MarketData({this.url = 'wss://api.derivws.com/trading/v1/options/ws/public'});
+  V13MarketData(
+      {this.url = 'wss://api.derivws.com/trading/v1/options/ws/public'});
   final String url;
   final _ticks = StreamController<V13Tick>.broadcast();
   final _historyUpdates = StreamController<String>.broadcast();
@@ -49,7 +50,9 @@ class V13MarketData {
     final generation = ++_generation;
     await _socketSubscription?.cancel();
     _heartbeat?.cancel();
-    try { await _socket?.sink.close(); } catch (_) {}
+    try {
+      await _socket?.sink.close();
+    } catch (_) {}
     connected = false;
     try {
       final channel = WebSocketChannel.connect(Uri.parse(url));
@@ -71,7 +74,8 @@ class V13MarketData {
       for (final symbol in selectedSymbols) {
         _subscribe(symbol);
       }
-      _heartbeat = Timer.periodic(const Duration(seconds: 25), (_) => _send({'ping': 1}));
+      _heartbeat = Timer.periodic(
+          const Duration(seconds: 25), (_) => _send({'ping': 1}));
     } catch (e) {
       _connecting = false;
       _disconnected(generation, '$e');
@@ -86,14 +90,23 @@ class V13MarketData {
   }
 
   void _subscribe(String symbol) {
-    _send({'ticks_history': symbol, 'count': 1000, 'end': 'latest', 'style': 'ticks', 'req_id': 7000 + selectedSymbols.toList().indexOf(symbol)});
+    _send({
+      'ticks_history': symbol,
+      'count': 1000,
+      'end': 'latest',
+      'style': 'ticks',
+      'req_id': 7000 + selectedSymbols.toList().indexOf(symbol)
+    });
     _send({'ticks': symbol, 'subscribe': 1});
   }
 
   void _send(Map<String, Object> message) {
     if (!connected) return;
-    try { _socket?.sink.add(jsonEncode(message)); }
-    catch (e) { _errors.add('Send failed: $e'); }
+    try {
+      _socket?.sink.add(jsonEncode(message));
+    } catch (e) {
+      _errors.add('Send failed: $e');
+    }
   }
 
   void _handle(dynamic raw) {
@@ -108,9 +121,12 @@ class V13MarketData {
           final found = <String, String>{};
           for (final entry in (data['active_symbols'] as List? ?? [])) {
             if (entry is! Map) continue;
-            final code = (entry['symbol'] ?? entry['underlying_symbol'] ?? '').toString();
+            final code = (entry['symbol'] ?? entry['underlying_symbol'] ?? '')
+                .toString();
             final name = (entry['display_name'] ?? code).toString();
-            if (code.isNotEmpty && (name.toLowerCase().contains('volatility') || RegExp(r'^(R_\d+|1HZ\d+V)$').hasMatch(code))) {
+            if (code.isNotEmpty &&
+                (name.toLowerCase().contains('volatility') ||
+                    RegExp(r'^(R_\d+|1HZ\d+V)$').hasMatch(code))) {
               found[code] = name;
             }
             final pip = entry['pip_size'];
@@ -123,13 +139,15 @@ class V13MarketData {
           if (symbol.isEmpty) return;
           final prices = data['history']?['prices'] as List? ?? [];
           final times = data['history']?['times'] as List? ?? [];
-          final pip = (data['pip_size'] as num?)?.toInt() ?? pipSizes[symbol] ?? 2;
+          final pip =
+              (data['pip_size'] as num?)?.toInt() ?? pipSizes[symbol] ?? 2;
           pipSizes[symbol] = pip;
           final buffer = <V13Tick>[];
           for (var i = 0; i < min(prices.length, times.length); i++) {
             final p = num.tryParse('${prices[i]}');
             final t = num.tryParse('${times[i]}');
-            if (p != null && t != null) buffer.add(V13Tick(symbol, p.toDouble(), t.toInt(), pip));
+            if (p != null && t != null)
+              buffer.add(V13Tick(symbol, p.toDouble(), t.toInt(), pip));
           }
           final existing = history[symbol] ?? <V13Tick>[];
           // Preserve live ticks received while the history request was in flight.
@@ -137,11 +155,15 @@ class V13MarketData {
           merged.sort((a, b) => a.epoch.compareTo(b.epoch));
           final unique = <V13Tick>[];
           for (final tick in merged) {
-            if (unique.isEmpty || unique.last.epoch != tick.epoch || unique.last.price != tick.price) {
+            if (unique.isEmpty ||
+                unique.last.epoch != tick.epoch ||
+                unique.last.price != tick.price) {
               unique.add(tick);
             }
           }
-          history[symbol] = unique.length > 5000 ? unique.sublist(unique.length - 5000) : unique;
+          history[symbol] = unique.length > 5000
+              ? unique.sublist(unique.length - 5000)
+              : unique;
           _historyUpdates.add(symbol);
           break;
         case 'tick':
@@ -151,19 +173,25 @@ class V13MarketData {
           final p = num.tryParse('${tick['quote']}');
           final t = num.tryParse('${tick['epoch']}');
           if (symbol.isEmpty || p == null || t == null) return;
-          final pip = (tick['pip_size'] as num?)?.toInt() ?? pipSizes[symbol] ?? 2;
+          final pip =
+              (tick['pip_size'] as num?)?.toInt() ?? pipSizes[symbol] ?? 2;
           pipSizes[symbol] = pip;
           final item = V13Tick(symbol, p.toDouble(), t.toInt(), pip);
           final buffer = history.putIfAbsent(symbol, () => []);
-          if (buffer.isEmpty || (item.epoch >= buffer.last.epoch &&
-              (buffer.last.epoch != item.epoch || buffer.last.price != item.price))) {
+          if (buffer.isEmpty ||
+              (item.epoch >= buffer.last.epoch &&
+                  (buffer.last.epoch != item.epoch ||
+                      buffer.last.price != item.price))) {
             buffer.add(item);
-            if (buffer.length > 5000) buffer.removeRange(0, buffer.length - 5000);
+            if (buffer.length > 5000)
+              buffer.removeRange(0, buffer.length - 5000);
             _ticks.add(item);
           }
           break;
       }
-    } catch (e) { _errors.add('Parse error: $e'); }
+    } catch (e) {
+      _errors.add('Parse error: $e');
+    }
   }
 
   /// Observed digit frequencies, not a forecast or a win probability.
@@ -171,8 +199,13 @@ class V13MarketData {
     final all = history[symbol] ?? [];
     final ticks = all.skip(max(0, all.length - sample)).toList();
     final counts = List<int>.filled(10, 0);
-    for (final tick in ticks) { counts[tick.lastDigit]++; }
-    return {for (var d = 0; d < 10; d++) d: ticks.isEmpty ? 0.0 : counts[d] / ticks.length};
+    for (final tick in ticks) {
+      counts[tick.lastDigit]++;
+    }
+    return {
+      for (var d = 0; d < 10; d++)
+        d: ticks.isEmpty ? 0.0 : counts[d] / ticks.length
+    };
   }
 
   void _disconnected(int generation, String reason) {
@@ -192,7 +225,9 @@ class V13MarketData {
     _retry?.cancel();
     _heartbeat?.cancel();
     await _socketSubscription?.cancel();
-    try { await _socket?.sink.close(); } catch (_) {}
+    try {
+      await _socket?.sink.close();
+    } catch (_) {}
     await _ticks.close();
     await _historyUpdates.close();
     await _symbols.close();

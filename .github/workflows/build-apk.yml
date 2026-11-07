@@ -28,7 +28,7 @@ jobs:
           channel: stable
 
       - name: Generate Android project
-        run: flutter create --platforms=android --project-name deriv_multi_volatility_bot .
+        run: flutter create --empty --no-pub --platforms=android --project-name v11_expert_trader .
 
       - name: Ensure Android internet permission
         run: |
@@ -51,9 +51,12 @@ jobs:
 
       - name: Install dependencies
         run: flutter pub get
-      - name: Remove corrupted Android NDK
-        run: |
-          rm -rf "$ANDROID_HOME/ndk/28.2.13676358"
+      - name: Check source paths
+        run: python3 tool/check_source_paths.py
+      - name: Analyze
+        run: flutter analyze
+      - name: Regression tests
+        run: flutter test
       - name: Build APK
         run: flutter build apk --debug
 
