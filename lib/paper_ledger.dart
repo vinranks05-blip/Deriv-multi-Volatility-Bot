@@ -2,31 +2,32 @@ import 'dart:math';
 import 'prediction_engine.dart';
 
 String conditionLabel(PredictionMode mode, int digit) => switch (mode) {
-      PredictionMode.matches => 'Matches',
-      PredictionMode.evenOdd => 'Even/Odd',
-      PredictionMode.over => 'Over $digit',
-      PredictionMode.under => 'Under $digit',
-    };
+  PredictionMode.matches => 'Matches',
+  PredictionMode.evenOdd => 'Even/Odd',
+  PredictionMode.over => 'Over $digit',
+  PredictionMode.under => 'Under $digit',
+};
 
 String signalLabel(PredictionMode mode, int digit) => switch (mode) {
-      PredictionMode.matches => 'MATCH $digit',
-      PredictionMode.evenOdd => digit.isEven ? 'EVEN' : 'ODD',
-      PredictionMode.over => 'OVER $digit',
-      PredictionMode.under => 'UNDER $digit',
-    };
+  PredictionMode.matches => 'MATCH $digit',
+  PredictionMode.evenOdd => digit.isEven ? 'EVEN' : 'ODD',
+  PredictionMode.over => 'OVER $digit',
+  PredictionMode.under => 'UNDER $digit',
+};
 
 class PaperConfig {
   final double stake, grossMultiplier;
   final int delayMs, durationTicks, expiryMs;
   final String condition, symbol;
-  const PaperConfig(
-      {this.stake = .35,
-      this.grossMultiplier = 9.24,
-      this.delayMs = 1000,
-      this.durationTicks = 1,
-      this.expiryMs = 5000,
-      this.condition = 'Matches',
-      this.symbol = 'R_25'});
+  const PaperConfig({
+    this.stake = .35,
+    this.grossMultiplier = 9.24,
+    this.delayMs = 1000,
+    this.durationTicks = 1,
+    this.expiryMs = 5000,
+    this.condition = 'Matches',
+    this.symbol = 'R_25',
+  });
   void validate() {
     if (!stake.isFinite ||
         stake <= 0 ||
@@ -40,27 +41,29 @@ class PaperConfig {
         durationTicks < 1 ||
         durationTicks > 100) {
       throw ArgumentError(
-          'Use positive stake, gross return > 1, delay shorter than expiry, and 1–100 ticks.');
+        'Use positive stake, gross return > 1, delay shorter than expiry, and 1–100 ticks.',
+      );
     }
   }
 
   Map<String, dynamic> toJson() => {
-        'stake': stake,
-        'grossMultiplier': grossMultiplier,
-        'delayMs': delayMs,
-        'durationTicks': durationTicks,
-        'expiryMs': expiryMs,
-        'condition': condition,
-        'symbol': symbol
-      };
+    'stake': stake,
+    'grossMultiplier': grossMultiplier,
+    'delayMs': delayMs,
+    'durationTicks': durationTicks,
+    'expiryMs': expiryMs,
+    'condition': condition,
+    'symbol': symbol,
+  };
   factory PaperConfig.fromJson(Map<String, dynamic> j) => PaperConfig(
-      stake: (j['stake'] as num).toDouble(),
-      grossMultiplier: (j['grossMultiplier'] as num).toDouble(),
-      delayMs: j['delayMs'],
-      durationTicks: j['durationTicks'],
-      expiryMs: j['expiryMs'],
-      condition: j['condition'],
-      symbol: j['symbol']);
+    stake: (j['stake'] as num).toDouble(),
+    grossMultiplier: (j['grossMultiplier'] as num).toDouble(),
+    delayMs: j['delayMs'],
+    durationTicks: j['durationTicks'],
+    expiryMs: j['expiryMs'],
+    condition: j['condition'],
+    symbol: j['symbol'],
+  );
 }
 
 class SignalRecord {
@@ -75,60 +78,66 @@ class SignalRecord {
   DateTime? entryAt, exitAt;
   int elapsedTicks = 0;
   double? entryPrice, exitPrice, profit;
-  SignalRecord(
-      {required this.id,
-      required this.symbol,
-      required this.model,
-      required this.mode,
-      required this.digit,
-      required this.sourceEpoch,
-      required this.sourceSequence,
-      required this.issued,
-      required this.score,
-      required this.config});
+  SignalRecord({
+    required this.id,
+    required this.symbol,
+    required this.model,
+    required this.mode,
+    required this.digit,
+    required this.sourceEpoch,
+    required this.sourceSequence,
+    required this.issued,
+    required this.score,
+    required this.config,
+  });
   String get condition => conditionLabel(mode, digit);
   String get label => signalLabel(mode, digit);
   double get baseline => uniformBaseline(mode, digit);
   bool get active =>
       observation == 'pending' || paper == 'waiting' || paper == 'open';
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'symbol': symbol,
-        'model': model,
-        'mode': mode.index,
-        'digit': digit,
-        'sourceEpoch': sourceEpoch,
-        'sourceSequence': sourceSequence,
-        'issued': issued.toUtc().toIso8601String(),
-        'score': score,
-        'config': config.toJson(),
-        'observation': observation,
-        'paper': paper,
-        'reason': reason,
-        'actual': actual,
-        'observationEpoch': observationEpoch,
-        'entryEpoch': entryEpoch,
-        'exitEpoch': exitEpoch,
-        'entryAt': entryAt?.toUtc().toIso8601String(),
-        'exitAt': exitAt?.toUtc().toIso8601String(),
-        'elapsedTicks': elapsedTicks,
-        'entryPrice': entryPrice,
-        'exitPrice': exitPrice,
-        'exitDigit': exitDigit,
-        'profit': profit
-      };
+    'schemaVersion': 2,
+    'modelVersion': 'v14',
+    'horizonTicks': 1,
+    'calibration': 'uncalibrated',
+    'id': id,
+    'symbol': symbol,
+    'model': model,
+    'mode': mode.index,
+    'digit': digit,
+    'sourceEpoch': sourceEpoch,
+    'sourceSequence': sourceSequence,
+    'issued': issued.toUtc().toIso8601String(),
+    'score': score,
+    'config': config.toJson(),
+    'observation': observation,
+    'paper': paper,
+    'reason': reason,
+    'actual': actual,
+    'observationEpoch': observationEpoch,
+    'entryEpoch': entryEpoch,
+    'exitEpoch': exitEpoch,
+    'entryAt': entryAt?.toUtc().toIso8601String(),
+    'exitAt': exitAt?.toUtc().toIso8601String(),
+    'elapsedTicks': elapsedTicks,
+    'entryPrice': entryPrice,
+    'exitPrice': exitPrice,
+    'exitDigit': exitDigit,
+    'profit': profit,
+  };
   factory SignalRecord.fromJson(Map<String, dynamic> j) {
     final r = SignalRecord(
-        id: j['id'],
-        symbol: j['symbol'],
-        model: j['model'],
-        mode: PredictionMode.values[j['mode']],
-        digit: j['digit'],
-        sourceEpoch: j['sourceEpoch'],
-        sourceSequence: j['sourceSequence'],
-        issued: DateTime.parse(j['issued']),
-        score: (j['score'] as num).toDouble(),
-        config: PaperConfig.fromJson(Map<String, dynamic>.from(j['config'])));
+      id: j['id'],
+      symbol: j['symbol'],
+      model: j['model'],
+      mode: PredictionMode.values[j['mode']],
+      digit: j['digit'],
+      sourceEpoch: j['sourceEpoch'],
+      sourceSequence: j['sourceSequence'],
+      issued: DateTime.parse(j['issued']),
+      score: (j['score'] as num).toDouble(),
+      config: PaperConfig.fromJson(Map<String, dynamic>.from(j['config'])),
+    );
     r.observation = j['observation'];
     r.paper = j['paper'];
     r.reason = j['reason'];
@@ -154,6 +163,52 @@ class PaperLedger {
   double initialBalance;
   bool enabled = false;
   PaperConfig config = const PaperConfig();
+  int maxEntries = 6, maxConsecutiveLosses = 2;
+  double sessionLossLimit = 1, sessionProfitLimit = 1, dailyLossLimit = 2;
+  DateTime sessionStart = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+  void resetSession(DateTime now) {
+    if (reserved > 0) throw StateError('Resolve active reservations first');
+    sessionStart = now.toUtc();
+    onEvent({'type': 'session', 'start': sessionStart.toIso8601String()});
+  }
+
+  String? riskBlock(DateTime now) {
+    final session = records.values
+        .where((r) => !r.issued.isBefore(sessionStart))
+        .toList();
+    final entries = session
+        .where(
+          (r) =>
+              r.paper != 'skipped' &&
+              r.paper != 'expired' &&
+              r.paper != 'cancelled',
+        )
+        .length;
+    final settled = LedgerStats(session).settled;
+    var losses = 0;
+    for (final r in settled.reversed) {
+      if (r.profit! >= 0) break;
+      losses++;
+    }
+    final pnl = LedgerStats(session).profit;
+    final utc = now.toUtc();
+    final day = DateTime.utc(utc.year, utc.month, utc.day);
+    final dailyLoss = records.values
+        .where(
+          (r) =>
+              r.exitAt != null &&
+              !r.exitAt!.isBefore(day) &&
+              (r.profit ?? 0) < 0,
+        )
+        .fold(0.0, (v, r) => v - r.profit!);
+    if (entries >= maxEntries) return 'Session entry limit reached';
+    if (losses >= maxConsecutiveLosses) return 'Consecutive loss limit reached';
+    if (pnl <= -sessionLossLimit || pnl >= sessionProfitLimit)
+      return 'Session P/L limit reached';
+    if (dailyLoss >= dailyLossLimit) return 'UTC daily loss limit reached';
+    return null;
+  }
+
   int _sequence = 0;
   final Map<String, int> _lastSequences = {};
   PaperLedger({required this.onEvent, this.initialBalance = 100});
@@ -161,8 +216,12 @@ class PaperLedger {
   double get realized =>
       records.values.fold(0.0, (v, r) => v + (r.profit ?? 0));
   double get reserved => records.values
-      .where((r) =>
-          r.paper == 'waiting' || r.paper == 'open' || r.paper == 'unresolved')
+      .where(
+        (r) =>
+            r.paper == 'waiting' ||
+            r.paper == 'open' ||
+            r.paper == 'unresolved',
+      )
       .fold(0.0, (v, r) => v + r.config.stake);
   double get available => initialBalance + realized - reserved;
   void _emit(SignalRecord r) {
@@ -176,9 +235,12 @@ class PaperLedger {
 
   void restore(List<Map<String, dynamic>> events) {
     for (final event in events) {
+      if (event['type'] == 'session')
+        sessionStart = DateTime.parse(event['start']);
       if (event['type'] == 'signal') {
-        final r =
-            SignalRecord.fromJson(Map<String, dynamic>.from(event['record']));
+        final r = SignalRecord.fromJson(
+          Map<String, dynamic>.from(event['record']),
+        );
         records[r.id] = r;
       }
     }
@@ -188,32 +250,36 @@ class PaperLedger {
     interrupt('App restarted');
   }
 
-  SignalRecord issue(
-      {required String symbol,
-      required String model,
-      required PredictionMode mode,
-      required int digit,
-      required int sourceEpoch,
-      required int sourceSequence,
-      required DateTime now,
-      required double score}) {
+  SignalRecord issue({
+    required String symbol,
+    required String model,
+    required PredictionMode mode,
+    required int digit,
+    required int sourceEpoch,
+    required int sourceSequence,
+    required DateTime now,
+    required double score,
+  }) {
     final r = SignalRecord(
-        id: '${now.toUtc().microsecondsSinceEpoch}-${_sequence++}',
-        symbol: symbol,
-        model: model,
-        mode: mode,
-        digit: digit,
-        sourceEpoch: sourceEpoch,
-        sourceSequence: sourceSequence,
-        issued: now.toUtc(),
-        score: score,
-        config: config);
+      id: '${now.toUtc().microsecondsSinceEpoch}-${_sequence++}',
+      symbol: symbol,
+      model: model,
+      mode: mode,
+      digit: digit,
+      sourceEpoch: sourceEpoch,
+      sourceSequence: sourceSequence,
+      issued: now.toUtc(),
+      score: score,
+      config: config,
+    );
     if (!enabled) {
       r.reason = 'Paper trading disabled';
     } else if (r.symbol != config.symbol) {
       r.reason = 'Not the selected paper market';
     } else if (r.condition != config.condition) {
       r.reason = 'No payout assumption configured for ${r.condition}';
+    } else if (riskBlock(now) != null) {
+      r.reason = riskBlock(now)!;
     } else if (reserved > 0) {
       r.reason = 'Another paper trade is active or unresolved';
     } else if (available < config.stake) {
@@ -227,13 +293,14 @@ class PaperLedger {
     return r;
   }
 
-  void tick(
-      {required String symbol,
-      required int epoch,
-      required int sequence,
-      required double price,
-      required int digit,
-      required DateTime now}) {
+  void tick({
+    required String symbol,
+    required int epoch,
+    required int sequence,
+    required double price,
+    required int digit,
+    required DateTime now,
+  }) {
     if (sequence <= (_lastSequences[symbol] ?? -1)) return;
     _lastSequences[symbol] = sequence;
     expire(now);
@@ -243,8 +310,9 @@ class PaperLedger {
       if (r.observation == 'pending') {
         r.actual = digit;
         r.observationEpoch = epoch;
-        r.observation =
-            digitWins(r.mode, r.digit, digit) ? 'correct' : 'incorrect';
+        r.observation = digitWins(r.mode, r.digit, digit)
+            ? 'correct'
+            : 'incorrect';
         changed = true;
       }
       if (r.paper == 'waiting' &&
@@ -364,42 +432,44 @@ class PaperLedger {
       'exit_epoch',
       'exit_price',
       'exit_digit',
-      'simulated_profit'
+      'simulated_profit',
     ];
     final lines = [columns.map(cell).join(',')];
     for (final r in records.values) {
-      lines.add([
-        r.id,
-        r.symbol,
-        predictionLabels[r.mode.index],
-        r.label,
-        r.model,
-        r.issued.toIso8601String(),
-        r.sourceEpoch,
-        r.sourceSequence,
-        r.score,
-        r.baseline * 100,
-        r.observation,
-        r.actual,
-        r.observationEpoch,
-        r.paper,
-        r.reason,
-        r.config.stake,
-        r.config.grossMultiplier,
-        r.config.condition,
-        r.config.symbol,
-        r.config.delayMs,
-        r.config.durationTicks,
-        r.config.expiryMs,
-        r.entryAt?.toIso8601String(),
-        r.entryEpoch,
-        r.entryPrice,
-        r.exitAt?.toIso8601String(),
-        r.exitEpoch,
-        r.exitPrice,
-        r.exitDigit,
-        r.profit
-      ].map(cell).join(','));
+      lines.add(
+        [
+          r.id,
+          r.symbol,
+          predictionLabels[r.mode.index],
+          r.label,
+          r.model,
+          r.issued.toIso8601String(),
+          r.sourceEpoch,
+          r.sourceSequence,
+          r.score,
+          r.baseline * 100,
+          r.observation,
+          r.actual,
+          r.observationEpoch,
+          r.paper,
+          r.reason,
+          r.config.stake,
+          r.config.grossMultiplier,
+          r.config.condition,
+          r.config.symbol,
+          r.config.delayMs,
+          r.config.durationTicks,
+          r.config.expiryMs,
+          r.entryAt?.toIso8601String(),
+          r.entryEpoch,
+          r.entryPrice,
+          r.exitAt?.toIso8601String(),
+          r.exitEpoch,
+          r.exitPrice,
+          r.exitDigit,
+          r.profit,
+        ].map(cell).join(','),
+      );
     }
     return '${lines.join('\r\n')}\r\n';
   }
@@ -417,7 +487,7 @@ class LedgerStats {
   double? get accuracy => observed.isEmpty
       ? null
       : observed.where((r) => r.observation == 'correct').length /
-          observed.length;
+            observed.length;
   double get profit => settled.fold(0.0, (v, r) => v + r.profit!);
   double get drawdown {
     var equity = 0.0, peak = 0.0, dd = 0.0;

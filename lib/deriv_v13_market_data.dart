@@ -18,8 +18,9 @@ class V13Tick {
 }
 
 class V13MarketData {
-  V13MarketData(
-      {this.url = 'wss://api.derivws.com/trading/v1/options/ws/public'});
+  V13MarketData({
+    this.url = 'wss://api.derivws.com/trading/v1/options/ws/public',
+  });
   final String url;
   final _ticks = StreamController<V13Tick>.broadcast();
   final _historyUpdates = StreamController<String>.broadcast();
@@ -66,16 +67,20 @@ class V13MarketData {
       connected = true;
       _connecting = false;
       _attempt = 0;
-      _socketSubscription = channel.stream.listen(_handle,
-          onError: (Object error) => _disconnected(generation, '$error'),
-          onDone: () => _disconnected(generation, 'WebSocket closed'),
-          cancelOnError: true);
+      _socketSubscription = channel.stream.listen(
+        _handle,
+        onError: (Object error) => _disconnected(generation, '$error'),
+        onDone: () => _disconnected(generation, 'WebSocket closed'),
+        cancelOnError: true,
+      );
       _send({'active_symbols': 'brief'});
       for (final symbol in selectedSymbols) {
         _subscribe(symbol);
       }
       _heartbeat = Timer.periodic(
-          const Duration(seconds: 25), (_) => _send({'ping': 1}));
+        const Duration(seconds: 25),
+        (_) => _send({'ping': 1}),
+      );
     } catch (e) {
       _connecting = false;
       _disconnected(generation, '$e');
@@ -95,7 +100,7 @@ class V13MarketData {
       'count': 1000,
       'end': 'latest',
       'style': 'ticks',
-      'req_id': 7000 + selectedSymbols.toList().indexOf(symbol)
+      'req_id': 7000 + selectedSymbols.toList().indexOf(symbol),
     });
     _send({'ticks': symbol, 'subscribe': 1});
   }
@@ -139,8 +144,9 @@ class V13MarketData {
           if (symbol.isEmpty) return;
           final prices = data['history']?['prices'] as List? ?? [];
           final times = data['history']?['times'] as List? ?? [];
-          final pip =
-              (data['pip_size'] as num?)?.toInt() ?? pipSizes[symbol] ?? 2;
+          final pip = (data['pip_size'] as num?)?.toInt() ?? pipSizes[symbol];
+          if (pip == null)
+            throw FormatException('Missing pip precision for $symbol');
           pipSizes[symbol] = pip;
           final buffer = <V13Tick>[];
           for (var i = 0; i < min(prices.length, times.length); i++) {
@@ -173,8 +179,9 @@ class V13MarketData {
           final p = num.tryParse('${tick['quote']}');
           final t = num.tryParse('${tick['epoch']}');
           if (symbol.isEmpty || p == null || t == null) return;
-          final pip =
-              (tick['pip_size'] as num?)?.toInt() ?? pipSizes[symbol] ?? 2;
+          final pip = (tick['pip_size'] as num?)?.toInt() ?? pipSizes[symbol];
+          if (pip == null)
+            throw FormatException('Missing pip precision for $symbol');
           pipSizes[symbol] = pip;
           final item = V13Tick(symbol, p.toDouble(), t.toInt(), pip);
           final buffer = history.putIfAbsent(symbol, () => []);
@@ -204,7 +211,7 @@ class V13MarketData {
     }
     return {
       for (var d = 0; d < 10; d++)
-        d: ticks.isEmpty ? 0.0 : counts[d] / ticks.length
+        d: ticks.isEmpty ? 0.0 : counts[d] / ticks.length,
     };
   }
 

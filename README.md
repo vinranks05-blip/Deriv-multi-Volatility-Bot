@@ -76,3 +76,21 @@ Radar provides compact cards, pinned markets, a ready-market filter, recent digi
 `archive/` preserves the previous sources, ZIPs, and documentation as reference material. Older Dart files are stored as `.dart.txt` so Flutter does not analyze or execute them. The preexisting V13 working file was preserved before changes. The former uppercase `Lib/Main.dart` index entry was a separate conflicting source and has also been preserved as text.
 
 Legacy V11 demo-order code is not part of the runnable app. Its volatile session limits and missing open-contract recovery are not suitable for reuse. Enabling broker orders would require a separately implemented and tested authenticated execution service with persistent limits and reconciliation. The current app has no order path, so it cannot submit or lose track of broker trades.
+
+## V14 implementation progress
+
+Paper entries enforce six entries per session, two consecutive losses, session
+P/L bounds of -1/+1 USD and a 2 USD UTC daily gross-loss limit. Explicit session
+reset is available only without reservations; reset events survive restart and
+do not clear history or daily losses. Limits currently use fixed UI defaults.
+Settings offers a persisted minimum uncalibrated score. Analyzer coverage counts
+eligible scans and abstentions for the current process only. Historical digit
+log loss and multiclass Brier score accompany accuracy; these do not establish
+calibration or predictive advantage. Missing symbol pip precision now blocks
+processing instead of assuming two decimal places.
+
+Remaining V14 guide work includes non-overlapping walk-forward evaluation,
+persisted abstention metrics, confidence calibration bins, drift diagnostics,
+model/window controls, configurable risk limits, expanded lifecycle CSV metadata,
+and full live-feed/build verification. Existing historical evaluation windows
+still overlap; their results must not be treated as independent forward evidence.

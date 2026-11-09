@@ -14,8 +14,9 @@ class FileLedgerStorage implements LedgerStorage {
   }
   Future<File>? _file;
   Future<void> _queue = Future.value();
-  Future<File> get file => _file ??= getApplicationSupportDirectory()
-      .then((dir) => File('${dir.path}/signal-ledger-v1.jsonl'));
+  Future<File> get file => _file ??= getApplicationSupportDirectory().then(
+    (dir) => File('${dir.path}/signal-ledger-v1.jsonl'),
+  );
   @override
   Future<List<Map<String, dynamic>>> read() async {
     final f = await file;
@@ -32,7 +33,8 @@ class FileLedgerStorage implements LedgerStorage {
         // original before repairing; corruption inside the file fails closed.
         if (i != lines.length - 1 || content.endsWith('\n')) rethrow;
         await f.copy(
-            '${f.path}.recovered-${DateTime.now().microsecondsSinceEpoch}');
+          '${f.path}.recovered-${DateTime.now().microsecondsSinceEpoch}',
+        );
         await f.writeAsString('${lines.take(i).join('\n')}\n', flush: true);
       }
     }

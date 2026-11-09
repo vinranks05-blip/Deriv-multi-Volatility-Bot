@@ -11,7 +11,10 @@ class DigitChoice {
 }
 
 DigitChoice chooseDigit(
-    List<double> probabilities, PredictionMode mode, int barrier) {
+  List<double> probabilities,
+  PredictionMode mode,
+  int barrier,
+) {
   if (barrier < 0 || barrier > 9) throw ArgumentError.value(barrier);
   switch (mode) {
     case PredictionMode.matches:
@@ -29,11 +32,15 @@ DigitChoice chooseDigit(
     case PredictionMode.over:
       if (barrier == 9) throw ArgumentError('Over 9 cannot win');
       return DigitChoice(
-          barrier, probabilities.skip(barrier + 1).fold(0.0, (a, b) => a + b));
+        barrier,
+        probabilities.skip(barrier + 1).fold(0.0, (a, b) => a + b),
+      );
     case PredictionMode.under:
       if (barrier == 0) throw ArgumentError('Under 0 cannot win');
       return DigitChoice(
-          barrier, probabilities.take(barrier).fold(0.0, (a, b) => a + b));
+        barrier,
+        probabilities.take(barrier).fold(0.0, (a, b) => a + b),
+      );
   }
 }
 
@@ -46,11 +53,11 @@ bool digitWins(PredictionMode mode, int predicted, int actual) =>
     };
 
 double uniformBaseline(PredictionMode mode, int barrier) => switch (mode) {
-      PredictionMode.matches => .1,
-      PredictionMode.evenOdd => .5,
-      PredictionMode.over => (9 - barrier) / 10,
-      PredictionMode.under => barrier / 10,
-    };
+  PredictionMode.matches => .1,
+  PredictionMode.evenOdd => .5,
+  PredictionMode.over => (9 - barrier) / 10,
+  PredictionMode.under => barrier / 10,
+};
 
 List<double> _features(List<int> xs, int i) {
   final x = List<double>.filled(31, 0);
@@ -135,15 +142,26 @@ class ModelEvaluation {
   final DigitModel model;
   final int validationCount, testCount;
   final double testAccuracy, baselineAccuracy;
-  const ModelEvaluation(this.model, this.validationCount, this.testCount,
-      this.testAccuracy, this.baselineAccuracy);
+  final double logLoss, brierScore;
+  const ModelEvaluation(
+    this.model,
+    this.validationCount,
+    this.testCount,
+    this.testAccuracy,
+    this.baselineAccuracy, {
+    this.logLoss = 0,
+    this.brierScore = 0,
+  });
 }
 
 // Select on the middle 20%; report performance only on the final 20%.
 // Every prediction sees only ticks preceding its label. The final test never
 // selects the model, including the decision whether to use ML.
 ModelEvaluation evaluateDigits(
-    List<int> all, PredictionMode mode, int barrier) {
+  List<int> all,
+  PredictionMode mode,
+  int barrier,
+) {
   if (all.length < 250) throw ArgumentError('Need at least 250 ticks');
   final xs = all.skip(max(0, all.length - 1200)).toList();
   final trainEnd = (xs.length * .6).floor();
@@ -153,7 +171,7 @@ ModelEvaluation evaluateDigits(
     const DigitModel(0),
     const DigitModel(1),
     const DigitModel(2),
-    DigitModel.trainML(training)
+    DigitModel.trainML(training),
   ];
   int wins(DigitModel model, int start, int end) {
     var right = 0;
@@ -174,15 +192,33 @@ ModelEvaluation evaluateDigits(
       chosen = candidate;
     }
   }
-  final baseline =
-      chooseDigit(const DigitModel(0).probabilities(training), mode, barrier);
+  final baseline = chooseDigit(
+    const DigitModel(0).probabilities(training),
+    mode,
+    barrier,
+  );
   var baseWins = 0;
   for (var i = testStart; i < xs.length; i++) {
     if (digitWins(mode, baseline.digit, xs[i])) baseWins++;
   }
+  var logLoss = 0.0, brier = 0.0;
+  for (var i = testStart; i < xs.length; i++) {
+    final p = chosen.probabilities(xs.sublist(max(0, i - 200), i));
+    logLoss -= log(max(1e-15, p[xs[i]]));
+    for (var d = 0; d < 10; d++) {
+      brier += pow(p[d] - (d == xs[i] ? 1 : 0), 2).toDouble();
+    }
+  }
   final count = xs.length - testStart;
-  return ModelEvaluation(chosen, testStart - trainEnd, count,
-      wins(chosen, testStart, xs.length) / count, baseWins / count);
+  return ModelEvaluation(
+    chosen,
+    testStart - trainEnd,
+    count,
+    wins(chosen, testStart, xs.length) / count,
+    baseWins / count,
+    logLoss: logLoss / count,
+    brierScore: brier / count,
+  );
 }
 
 bool needsEvaluation(int tickSequence, int? previousSequence) =>
