@@ -78,10 +78,14 @@ void main() {
     final storage = MemoryLedgerStorage();
     await tester.pumpWidget(V13App(data: data, storage: storage));
     await tester.pump();
+    // Matches deliberately abstains until 100+ validation labels and
+    // a measured advantage over its frequency baseline are available.
+    // Use Under to test lifecycle cancellation independently of that gate.
+    await tester.tap(find.widgetWithText(ChoiceChip, 'Under'));
     data.seed();
     await tester.pump();
     await tester.pump(const Duration(seconds: 10));
-    expect(find.text('NEXT TICK • MATCH 2'), findsOneWidget);
+    expect(find.text('NEXT TICK • UNDER 5'), findsOneWidget);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
     await tester.pump();
     data.emit(301);

@@ -58,6 +58,10 @@ void main() {
         RepaintBoundary(key: key, child: V13App(data: data, storage: storage)));
     await tester.pump();
     await capture(tester, key, 'radar');
+    // Paper trading exercises the lifecycle using an eligible condition.
+    // Matches requires a larger validation sample and may abstain.
+    await tester.tap(find.widgetWithText(ChoiceChip, 'Under'));
+    await tester.pump();
     await tester.tap(find.text('Paper'));
     await tester.pump();
     expect(find.text('Paper Trading'), findsOneWidget);
@@ -82,7 +86,7 @@ void main() {
     await tester.tap(find.text('Ledger'));
     await tester.pump();
     expect(find.text('Signal Ledger'), findsOneWidget);
-    expect(find.text('R_25 • MATCH 2'), findsOneWidget);
+    expect(find.text('R_25 • UNDER 5'), findsOneWidget);
     final export = tester.widget<FilledButton>(
         find.widgetWithText(FilledButton, 'EXPORT ALL CSV'));
     expect(export.onPressed, isNotNull);
