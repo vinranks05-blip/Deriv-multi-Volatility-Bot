@@ -49,6 +49,8 @@ class Market {
   double logLoss = 0, brier = 0;
   int eligible = 0, abstained = 0;
   int testCount = 0, tickSequence = 0;
+  int validationCount = 0;
+  double validationAccuracy = 0, validationBaseline = 0;
   int? lastEvaluationSequence;
   int evaluatedStrategy = -1, evaluatedBarrier = -1;
   DigitModel model = const DigitModel(0);
@@ -336,6 +338,9 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
     m.model = evaluation.model;
     m.method = evaluation.model.name;
     m.testCount = evaluation.testCount;
+    m.validationCount = evaluation.validationCount;
+    m.validationAccuracy = evaluation.validationAccuracy;
+    m.validationBaseline = evaluation.validationBaselineAccuracy;
     m.holdout = evaluation.testAccuracy * 100;
     m.baseline = evaluation.baselineAccuracy * 100;
     m.lastEvaluationSequence = m.tickSequence;
@@ -364,6 +369,16 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
     );
     final choice = chooseDigit(probabilities, mode, barrier);
     m.eligible++;
+    // Selection gate uses validation only; never use final-test outcomes to
+    // select signals. A 250-tick sample yields just 50 validation labels.
+    // Require 100+ and a margin over the train-only frequency baseline.
+    if (mode == PredictionMode.matches &&
+        (m.validationCount < 100 ||
+         m.validationAccuracy <= m.validationBaseline + 0.02)) {
+      m.abstained++;
+      m.phase = 'No signal: insufficient validation evidence';
+      return;
+    }
     if (choice.score < confidenceThreshold) {
       m.abstained++;
       m.phase = 'No signal: below score threshold';

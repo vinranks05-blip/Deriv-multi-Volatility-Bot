@@ -50,25 +50,30 @@ void main() {
     }
     SharedPreferences.setMockInitialValues({
       'paperConfig':
-          jsonEncode(const PaperConfig(symbol: 'R_25', delayMs: 0).toJson())
+    jsonEncode(const PaperConfig(symbol: 'R_25', delayMs: 1000).toJson())
     });
     final data = FakeMarketData(), storage = MemoryLedgerStorage();
+        data.seed(symbol: 'R_25');
     final key = GlobalKey();
     await tester.pumpWidget(
         RepaintBoundary(key: key, child: V13App(data: data, storage: storage)));
     await tester.pump();
     await capture(tester, key, 'radar');
+    // Paper trading exercises the lifecycle using an eligible condition.
+    // Matches requires a larger validation sample and may abstain.
+    await tester.tap(find.widgetWithText(ChoiceChip, 'Under'));
+    await tester.pump();
     await tester.tap(find.text('Paper'));
     await tester.pump();
     expect(find.text('Paper Trading'), findsOneWidget);
     await capture(tester, key, 'paper');
-    await tester.ensureVisible(find.text('START PAPER'));
-    await tester.pump();
-    await tester.tap(find.text('START PAPER'));
-    await tester.pump();
-    data.seed(symbol: 'R_25');
+await tester.ensureVisible(find.text('START PAPER'));
+await tester.pumpAndSettle();
+await tester.tap(find.text('START PAPER'));
+await tester.pump();
     await tester.pump();
     await tester.pump(const Duration(seconds: 10));
+    print(storage.events.last['record']);
     expect(storage.events.last['record']['paper'], 'waiting');
     data.emit(301, symbol: 'R_25');
     await tester.pump();
@@ -82,7 +87,7 @@ void main() {
     await tester.tap(find.text('Ledger'));
     await tester.pump();
     expect(find.text('Signal Ledger'), findsOneWidget);
-    expect(find.text('R_25 • MATCH 2'), findsOneWidget);
+    expect(find.text('R_25 • UNDER 5'), findsOneWidget);
     final export = tester.widget<FilledButton>(
         find.widgetWithText(FilledButton, 'EXPORT ALL CSV'));
     expect(export.onPressed, isNotNull);

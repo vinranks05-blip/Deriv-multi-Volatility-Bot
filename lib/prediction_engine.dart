@@ -142,6 +142,7 @@ class ModelEvaluation {
   final DigitModel model;
   final int validationCount, testCount;
   final double testAccuracy, baselineAccuracy;
+  final double validationAccuracy, validationBaselineAccuracy;
   final double logLoss, brierScore;
   const ModelEvaluation(
     this.model,
@@ -149,6 +150,8 @@ class ModelEvaluation {
     this.testCount,
     this.testAccuracy,
     this.baselineAccuracy, {
+    this.validationAccuracy = 0,
+    this.validationBaselineAccuracy = 0,
     this.logLoss = 0,
     this.brierScore = 0,
   });
@@ -183,6 +186,7 @@ ModelEvaluation evaluateDigits(
     return right;
   }
 
+  final validationBaseline = wins(const DigitModel(0), trainEnd, testStart) / (testStart - trainEnd);
   var chosen = candidates.first;
   var best = -1;
   for (final candidate in candidates) {
@@ -192,15 +196,9 @@ ModelEvaluation evaluateDigits(
       chosen = candidate;
     }
   }
-  final baseline = chooseDigit(
-    const DigitModel(0).probabilities(training),
-    mode,
-    barrier,
-  );
-  var baseWins = 0;
-  for (var i = testStart; i < xs.length; i++) {
-    if (digitWins(mode, baseline.digit, xs[i])) baseWins++;
-  }
+  // Compare against the same rolling, past-only frequency baseline used
+  // during validation. A frozen training prediction is not comparable.
+  final baseWins = wins(const DigitModel(0), testStart, xs.length);
   var logLoss = 0.0, brier = 0.0;
   for (var i = testStart; i < xs.length; i++) {
     final p = chosen.probabilities(xs.sublist(max(0, i - 200), i));
@@ -216,6 +214,8 @@ ModelEvaluation evaluateDigits(
     count,
     wins(chosen, testStart, xs.length) / count,
     baseWins / count,
+    validationAccuracy: best / (testStart - trainEnd),
+    validationBaselineAccuracy: validationBaseline,
     logLoss: logLoss / count,
     brierScore: brier / count,
   );
