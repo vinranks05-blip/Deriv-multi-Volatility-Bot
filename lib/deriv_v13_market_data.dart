@@ -10,11 +10,26 @@ class V13Tick {
   final double price;
   final int epoch;
   final int pipSize;
-  const V13Tick(this.symbol, this.price, this.epoch, this.pipSize);
+  /// Broker quote text, retained to avoid binary floating-point digit drift.
+  final String? quoteText;
+  const V13Tick(this.symbol, this.price, this.epoch, this.pipSize, [this.quoteText]);
   int get lastDigit {
-    final formatted = price.toStringAsFixed(pipSize);
-    return int.parse(formatted[formatted.length - 1]);
+    return digitFromQuote(quoteText ?? price.toStringAsFixed(pipSize), pipSize);
   }
+}
+
+/// Extract the final quoted digit without converting through a binary double.
+/// Supports a shorter quote by padding to the broker-declared precision.
+int digitFromQuote(String quote, int pipSize) {
+  if (pipSize < 0 || pipSize > 20) throw FormatException('Invalid pip size');
+  final match = RegExp(r'^[-+]?(\d+)(?:\.(\d+))?$').firstMatch(quote.trim());
+  if (match == null) throw FormatException('Invalid quote: $quote');
+  final fraction = match.group(2) ?? '';
+  if (fraction.length > pipSize) {
+    throw FormatException('Quote exceeds declared pip size: $quote');
+  }
+  if (pipSize == 0) return int.parse(match.group(1)!.substring(match.group(1)!.length - 1));
+  return int.parse(fraction.padRight(pipSize, '0')[pipSize - 1]);
 }
 
 class V13MarketData {
@@ -135,7 +150,9 @@ class V13MarketData {
               found[code] = name;
             }
             final pip = entry['pip_size'];
-            if (pip is num && code.isNotEmpty) pipSizes[code] = pip.toInt();
+            if (pip is num && pip >= 0 && pip <= 20 && code.isNotEmpty) {
+              pipSizes[code] = pip.toInt();
+            }
           }
           _symbols.add(found);
           break;
@@ -145,15 +162,15 @@ class V13MarketData {
           final prices = data['history']?['prices'] as List? ?? [];
           final times = data['history']?['times'] as List? ?? [];
           final pip = (data['pip_size'] as num?)?.toInt() ?? pipSizes[symbol];
-          if (pip == null)
-            throw FormatException('Missing pip precision for $symbol');
+          if (pip == null || pip < 0 || pip > 20)
+            throw FormatException('Missing or invalid pip precision for $symbol');
           pipSizes[symbol] = pip;
           final buffer = <V13Tick>[];
           for (var i = 0; i < min(prices.length, times.length); i++) {
             final p = num.tryParse('${prices[i]}');
             final t = num.tryParse('${times[i]}');
             if (p != null && t != null)
-              buffer.add(V13Tick(symbol, p.toDouble(), t.toInt(), pip));
+              buffer.add(V13Tick(symbol, p.toDouble(), t.toInt(), pip, prices[i].toString()));
           }
           final existing = history[symbol] ?? <V13Tick>[];
           // Preserve live ticks received while the history request was in flight.
@@ -163,7 +180,7 @@ class V13MarketData {
           for (final tick in merged) {
             if (unique.isEmpty ||
                 unique.last.epoch != tick.epoch ||
-                unique.last.price != tick.price) {
+                unique.last.quoteText != tick.quoteText) {
               unique.add(tick);
             }
           }
@@ -180,15 +197,15 @@ class V13MarketData {
           final t = num.tryParse('${tick['epoch']}');
           if (symbol.isEmpty || p == null || t == null) return;
           final pip = (tick['pip_size'] as num?)?.toInt() ?? pipSizes[symbol];
-          if (pip == null)
-            throw FormatException('Missing pip precision for $symbol');
+          if (pip == null || pip < 0 || pip > 20)
+            throw FormatException('Missing or invalid pip precision for $symbol');
           pipSizes[symbol] = pip;
-          final item = V13Tick(symbol, p.toDouble(), t.toInt(), pip);
+          final item = V13Tick(symbol, p.toDouble(), t.toInt(), pip, tick['quote'].toString());
           final buffer = history.putIfAbsent(symbol, () => []);
           if (buffer.isEmpty ||
               (item.epoch >= buffer.last.epoch &&
                   (buffer.last.epoch != item.epoch ||
-                      buffer.last.price != item.price))) {
+                      buffer.last.quoteText != item.quoteText))) {
             buffer.add(item);
             if (buffer.length > 5000)
               buffer.removeRange(0, buffer.length - 5000);
@@ -220,6 +237,8 @@ class V13MarketData {
     connected = false;
     _connecting = false;
     _heartbeat?.cancel();
+    _socketSubscription?.cancel();
+    _socket?.sink.close();
     _errors.add(reason);
     _retry?.cancel();
     final delay = min(60, 1 << min(_attempt++, 6));
