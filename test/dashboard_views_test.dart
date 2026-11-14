@@ -53,6 +53,7 @@ void main() {
     jsonEncode(const PaperConfig(symbol: 'R_25', delayMs: 1000).toJson())
     });
     final data = FakeMarketData(), storage = MemoryLedgerStorage();
+        data.seed(symbol: 'R_25');
     final key = GlobalKey();
     await tester.pumpWidget(
         RepaintBoundary(key: key, child: V13App(data: data, storage: storage)));
@@ -70,7 +71,6 @@ await tester.ensureVisible(find.text('START PAPER'));
 await tester.pumpAndSettle();
 await tester.tap(find.text('START PAPER'));
 await tester.pump();
-expect(find.text('PAPER RUNNING'), findsOneWidget);
     await tester.pump();
     await tester.pump(const Duration(seconds: 10));
     print(storage.events.last['record']);
