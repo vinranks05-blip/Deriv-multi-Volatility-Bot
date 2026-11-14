@@ -73,6 +73,7 @@ void main() {
     data.seed(symbol: 'R_25');
     await tester.pump();
     await tester.pump(const Duration(seconds: 10));
+    print(storage.events.last['record']);
     expect(storage.events.last['record']['paper'], 'waiting');
     data.emit(301, symbol: 'R_25');
     await tester.pump();
