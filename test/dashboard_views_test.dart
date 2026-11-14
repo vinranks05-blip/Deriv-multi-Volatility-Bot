@@ -50,7 +50,7 @@ void main() {
     }
     SharedPreferences.setMockInitialValues({
       'paperConfig':
-          jsonEncode(const PaperConfig(symbol: 'R_25', delayMs: 1000).toJson())
+    jsonEncode(const PaperConfig(symbol: 'R_25', delayMs: 1000).toJson())
     });
     final data = FakeMarketData(), storage = MemoryLedgerStorage();
     final key = GlobalKey();
