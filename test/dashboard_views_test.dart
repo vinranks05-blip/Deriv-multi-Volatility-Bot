@@ -66,11 +66,11 @@ void main() {
     await tester.pump();
     expect(find.text('Paper Trading'), findsOneWidget);
     await capture(tester, key, 'paper');
-    await tester.ensureVisible(find.text('START PAPER'));
+await tester.ensureVisible(find.text('START PAPER'));
+await tester.pumpAndSettle();
 await tester.tap(find.text('START PAPER'));
 await tester.pump();
 expect(find.text('PAPER RUNNING'), findsOneWidget);
-    data.seed(symbol: 'R_25');
     await tester.pump();
     await tester.pump(const Duration(seconds: 10));
     print(storage.events.last['record']);
