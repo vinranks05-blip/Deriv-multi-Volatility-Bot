@@ -2,6 +2,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:v11_expert_trader/prediction_engine.dart';
 
 void main() {
+  test('uniform MATCHES stream cannot establish an edge', () {
+    final digits = List<int>.generate(1200, (i) => i % 10);
+    final result = evaluateDigits(digits, PredictionMode.matches, 5);
+    expect(result.testCount, 240);
+    expect(result.accuracyLowerBound, lessThanOrEqualTo(result.testAccuracy));
+    expect(result.uniformBaselineForMode, closeTo(.1, 1e-12));
+  });
+
+  test('small test samples never claim proven advantage', () {
+    const result = ModelEvaluation(DigitModel(0), 50, 50, .9, .1);
+    expect(result.evidenceOfEdge, isFalse);
+  });
+
   test('ML uses current features for every prediction', () {
     final weights = List.generate(10, (_) => List<double>.filled(31, 0));
     weights[3][1 + 2] = 8;
