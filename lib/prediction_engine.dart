@@ -81,7 +81,7 @@ class DigitModel {
   factory DigitModel.trainML(List<int> training) {
     final w = List.generate(10, (_) => List<double>.filled(31, 0));
     for (var pass = 0; pass < 5; pass++) {
-      for (var i = 50; i < training.length - 1; i += 2) {
+      for (var i = 50; i < training.length - 1; i++) {
         final x = _features(training, i);
         final p = _softmax(w, x);
         for (var d = 0; d < 10; d++) {
@@ -143,6 +143,29 @@ class ModelEvaluation {
   final int validationCount, testCount;
   final double testAccuracy, baselineAccuracy;
   final double logLoss, brierScore;
+  /// Conservative 95% Wilson lower confidence bound for held-out wins.
+  double get accuracyLowerBound {
+    if (testCount <= 0) return 0;
+    const z = 1.96;
+    final n = testCount.toDouble();
+    final phat = testAccuracy;
+    final denom = 1 + z * z / n;
+    return max(0.0, (phat + z * z / (2 * n) -
+        z * sqrt((phat * (1 - phat) + z * z / (4 * n)) / n)) / denom);
+  }
+
+  /// An accuracy advantage is not established merely by beating the baseline
+  /// on a small sample. For MATCHES the uniform null probability is 10%.
+  bool get evidenceOfEdge => testCount >= 200 &&
+      accuracyLowerBound > uniformBaselineForMode;
+  double get uniformBaselineForMode => switch (evaluatedMode) {
+    PredictionMode.matches => 0.1,
+    PredictionMode.evenOdd => 0.5,
+    PredictionMode.over => (9 - evaluatedBarrier) / 10,
+    PredictionMode.under => evaluatedBarrier / 10,
+  };
+  final PredictionMode evaluatedMode;
+  final int evaluatedBarrier;
   const ModelEvaluation(
     this.model,
     this.validationCount,
@@ -151,6 +174,8 @@ class ModelEvaluation {
     this.baselineAccuracy, {
     this.logLoss = 0,
     this.brierScore = 0,
+    this.evaluatedMode = PredictionMode.matches,
+    this.evaluatedBarrier = 5,
   });
 }
 
@@ -218,6 +243,8 @@ ModelEvaluation evaluateDigits(
     baseWins / count,
     logLoss: logLoss / count,
     brierScore: brier / count,
+    evaluatedMode: mode,
+    evaluatedBarrier: barrier,
   );
 }
 
