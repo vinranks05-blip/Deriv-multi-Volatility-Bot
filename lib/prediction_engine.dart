@@ -143,7 +143,7 @@ class ModelEvaluation {
   final int validationCount, testCount;
   final double testAccuracy, baselineAccuracy;
   final double logLoss, brierScore;
-  /// Conservative 95% Wilson lower confidence bound for held-out wins.
+  /// Conservative Wilson lower bound. This is a diagnostic, not proof of profit.
   double get accuracyLowerBound {
     if (testCount <= 0) return 0;
     const z = 1.96;
@@ -156,8 +156,11 @@ class ModelEvaluation {
 
   /// An accuracy advantage is not established merely by beating the baseline
   /// on a small sample. For MATCHES the uniform null probability is 10%.
-  bool get evidenceOfEdge => testCount >= 200 &&
-      accuracyLowerBound > uniformBaselineForMode;
+  bool get evidenceOfEdge => matchesSignalAllowed(
+    testCount: testCount,
+    testAccuracy: testAccuracy,
+    nullWinProbability: uniformBaselineForMode,
+  );
   double get uniformBaselineForMode => switch (evaluatedMode) {
     PredictionMode.matches => 0.1,
     PredictionMode.evenOdd => 0.5,
@@ -188,7 +191,7 @@ ModelEvaluation evaluateDigits(
   int barrier,
 ) {
   if (all.length < 250) throw ArgumentError('Need at least 250 ticks');
-  final xs = all.skip(max(0, all.length - 1200)).toList();
+  final xs = all.skip(max(0, all.length - 2000)).toList();
   final trainEnd = (xs.length * .6).floor();
   final testStart = (xs.length * .8).floor();
   final training = xs.sublist(0, trainEnd);
@@ -250,3 +253,47 @@ ModelEvaluation evaluateDigits(
 
 bool needsEvaluation(int tickSequence, int? previousSequence) =>
     previousSequence == null || tickSequence - previousSequence >= 100;
+
+/// Conservative MATCHES eligibility check. A high model score alone is not
+/// evidence of predictive advantage; use held-out outcomes and uncertainty.
+bool matchesSignalAllowed({
+  required int testCount,
+  required double testAccuracy,
+  int minimumObservations = 300,
+  double nullWinProbability = 0.10,
+}) {
+  if (testCount < minimumObservations ||
+      !testAccuracy.isFinite || testAccuracy < 0 || testAccuracy > 1) {
+    return false;
+  }
+  // 99% one-sided-conservative Wilson threshold, mitigating repeated checks.
+  // Historical windows still overlap: never interpret this as live proof.
+  const z = 2.576;
+  final n = testCount.toDouble();
+  final denom = 1 + z * z / n;
+  final lower = (testAccuracy + z * z / (2 * n) -
+      z * sqrt((testAccuracy * (1 - testAccuracy) + z * z / (4 * n)) / n)) / denom;
+  return lower > nullWinProbability;
+}
+
+/// Verify that a forecast is scored on precisely the next observed tick.
+/// Never use an equal or earlier sequence, a backwards epoch, or another market.
+bool isNextTickObservation({
+  required String forecastSymbol,
+  required String observedSymbol,
+  required int sourceSequence,
+  required int observedSequence,
+  required int sourceEpoch,
+  required int observedEpoch,
+}) => forecastSymbol == observedSymbol &&
+    observedSequence == sourceSequence + 1 &&
+    observedEpoch >= sourceEpoch;
+
+/// Independent forward observations, one outcome per completed forecast.
+/// This is descriptive only; no trading eligibility is inferred.
+class ForwardAccuracy {
+  final int wins, observations;
+  const ForwardAccuracy(this.wins, this.observations);
+  double? get accuracy => observations == 0 ? null : wins / observations;
+  bool get sufficientSample => observations >= 300;
+}
