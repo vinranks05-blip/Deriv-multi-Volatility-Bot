@@ -2,6 +2,33 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:v11_expert_trader/prediction_engine.dart';
 
 void main() {
+  test('MATCHES gate abstains on weak or insufficient evidence', () {
+    expect(matchesSignalAllowed(testCount: 221, testAccuracy: .081), isFalse);
+    expect(matchesSignalAllowed(testCount: 50, testAccuracy: .9), isFalse);
+    expect(matchesSignalAllowed(testCount: 1000, testAccuracy: .10), isFalse);
+    expect(matchesSignalAllowed(testCount: 1000, testAccuracy: .20), isTrue);
+    expect(matchesSignalAllowed(testCount: 240, testAccuracy: .95), isFalse);
+    expect(matchesSignalAllowed(testCount: 1000, testAccuracy: double.nan), isFalse);
+  });
+
+  test('next-tick scoring rejects wrong market, gaps and stale observations', () {
+    bool check(String market, int sequence, int epoch) => isNextTickObservation(
+      forecastSymbol: 'R_10', observedSymbol: market,
+      sourceSequence: 50, observedSequence: sequence,
+      sourceEpoch: 100, observedEpoch: epoch);
+    expect(check('R_10', 51, 100), isTrue);
+    expect(check('R_25', 51, 100), isFalse);
+    expect(check('R_10', 52, 101), isFalse);
+    expect(check('R_10', 50, 100), isFalse);
+    expect(check('R_10', 51, 99), isFalse);
+  });
+
+  test('forward accuracy does not claim a reliable sample too early', () {
+    expect(const ForwardAccuracy(0, 0).accuracy, isNull);
+    expect(const ForwardAccuracy(20, 100).sufficientSample, isFalse);
+    expect(const ForwardAccuracy(33, 300).accuracy, closeTo(.11, 1e-9));
+  });
+
   test('uniform MATCHES stream cannot establish an edge', () {
     final digits = List<int>.generate(1200, (i) => i % 10);
     final result = evaluateDigits(digits, PredictionMode.matches, 5);
