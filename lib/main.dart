@@ -554,13 +554,13 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'NEXT TICK • $condition',
+                      f == null ? 'ANALYZING • $condition' : 'VALIDATED • $condition',
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     Text(
                       f == null
-                          ? 'Awaiting scan'
-                          : 'Model score ${f.score.toStringAsFixed(1)}% (uncalibrated)',
+                          ? 'NEXT SCAN IN ${scanRemaining}s • no entry signal'
+                          : 'Model score ${f.score.toStringAsFixed(1)}% • uncalibrated',
                       style: const TextStyle(fontSize: 12, color: Colors.amber),
                     ),
                     if (!compact)
@@ -636,7 +636,7 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
           style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
         ),
         const Text(
-          'Experimental NEXT-TICK digit forecasts',
+          'Real-time digit analysis • validated signals',
           style: TextStyle(fontSize: 12, color: Colors.white70),
         ),
         Wrap(
@@ -677,6 +677,45 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
             style: TextStyle(color: Colors.amber),
           ),
         const SizedBox(height: 12),
+        _card(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                const Icon(Icons.bolt, color: green, size: 19),
+                const SizedBox(width: 6),
+                Text(
+                  markets.any((m) => m.forecast != null)
+                      ? 'VALIDATED SIGNALS'
+                      : 'WAITING FOR VALIDATED ENTRY',
+                  style: const TextStyle(color: green, fontWeight: FontWeight.bold),
+                ),
+              ]),
+              const SizedBox(height: 5),
+              Text(
+                '${markets.where((m) => m.forecast != null).length} ready • '
+                '${markets.where((m) => m.live && m.forecast == null).length} analyzing',
+                style: const TextStyle(fontSize: 13),
+              ),
+              const SizedBox(height: 8),
+              for (final m in markets.where((m) => m.forecast != null))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(children: [
+                    Expanded(child: Text(m.name, style: const TextStyle(fontWeight: FontWeight.w600))),
+                    Text('DIGIT ${m.forecast!.digit}  •  ${m.forecast!.score.toStringAsFixed(0)}% model score',
+                      style: const TextStyle(color: green, fontSize: 12)),
+                  ]),
+                ),
+              if (!markets.any((m) => m.forecast != null))
+                Text('Next scan in ${scanRemaining}s • No trade signal issued',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12)),
+              const SizedBox(height: 5),
+              const Text('Model scores are uncalibrated, not win probabilities. Observation/paper mode only.',
+                style: TextStyle(fontSize: 11, color: Colors.white60)),
+            ],
+          ),
+        ),
         Row(
           children: [
             _metric(_rate(sample), 'OBSERVED ACCURACY'),
