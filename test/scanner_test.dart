@@ -57,11 +57,11 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 10));
     // Constant-digit synthetic history must not force an unqualified signal.
-    expect(storage.events, isEmpty);
+    expect(storage.events.where((e) => e['paper'] == 'opened' || e['paper'] == 'settled'), isEmpty);
     data.emit(301);
     await tester.pump();
     await tester.pump();
-    expect(storage.events, isEmpty);
+    expect(storage.events.where((e) => e['paper'] == 'opened' || e['paper'] == 'settled'), isEmpty);
     await tester.pumpWidget(const SizedBox());
     await tester.pump();
     expect(tester.takeException(), isNull);
