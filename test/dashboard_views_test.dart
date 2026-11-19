@@ -30,7 +30,7 @@ Future<void> capture(WidgetTester tester, GlobalKey key, String name) async {
 
 void main() {
   testWidgets(
-      'phone dashboard starts paper trading, records results and exposes export',
+      'phone dashboard rejects ineligible MATCH paper orders and exposes export',
       (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(430, 932);
@@ -69,20 +69,20 @@ void main() {
     data.seed(symbol: 'R_25');
     await tester.pump();
     await tester.pump(const Duration(seconds: 10));
-    expect(storage.events.last['record']['paper'], 'waiting');
+    // MATCH abstains without sufficient independent held-out evidence.
+    // Paper mode must not create an order from a rejected signal.
+    expect(storage.events, isEmpty);
     data.emit(301, symbol: 'R_25');
     await tester.pump();
-    expect(storage.events.last['record']['paper'], 'open');
     data.emit(302, symbol: 'R_25');
     await tester.pump();
-    expect(storage.events.last['record']['paper'], 'won');
-    expect(storage.events.last['record']['observation'], 'correct');
+    expect(storage.events, isEmpty);
     await tester.ensureVisible(find.text('Ledger'));
     await tester.pump();
     await tester.tap(find.text('Ledger'));
     await tester.pump();
     expect(find.text('Signal Ledger'), findsOneWidget);
-    expect(find.text('R_25 • MATCH 2'), findsOneWidget);
+    expect(find.text('R_25 • MATCH 2'), findsNothing);
     final export = tester.widget<FilledButton>(
         find.widgetWithText(FilledButton, 'EXPORT ALL CSV'));
     expect(export.onPressed, isNotNull);

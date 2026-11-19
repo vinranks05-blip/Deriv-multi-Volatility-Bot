@@ -71,7 +71,7 @@ void main() {
   });
 
   testWidgets(
-      'pausing discards a pending forecast instead of scoring a missed tick',
+      'pausing without an eligible MATCH forecast does not create a missed tick',
       (tester) async {
     SharedPreferences.setMockInitialValues({});
     final data = FakeMarketData();
@@ -81,12 +81,15 @@ void main() {
     data.seed();
     await tester.pump();
     await tester.pump(const Duration(seconds: 10));
-    expect(find.text('NEXT TICK • MATCH 2'), findsOneWidget);
+    // MATCH must abstain on the short, constant-digit synthetic history.
+    expect(find.text('NEXT TICK • MATCH 2'), findsNothing);
+    expect(storage.events, isEmpty);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
     await tester.pump();
     data.emit(301);
     await tester.pump();
-    expect(storage.events.last['record']['observation'], 'missed');
+    // A pause must not manufacture a missed forecast when none was issued.
+    expect(storage.events, isEmpty);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pumpWidget(const SizedBox());
     await tester.pump();
