@@ -508,7 +508,10 @@ extension _DashboardViews on _DashboardState {
             child: Text('No signals match these filters.'),
           ),
         ...filtered.skip(page * 30).take(30).map(_signalCard),
-        Row(
+        Wrap(
+          spacing: 4,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             TextButton(
               onPressed: page > 0

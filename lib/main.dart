@@ -460,7 +460,7 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
               color: cyan,
             ),
           ),
-          Text(label, style: const TextStyle(fontSize: 10)),
+          Text(label, textAlign: TextAlign.center, softWrap: true, style: const TextStyle(fontSize: 10)),
         ],
       ),
     ),
