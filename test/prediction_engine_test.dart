@@ -2,6 +2,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:v11_expert_trader/prediction_engine.dart';
 
 void main() {
+  test('MATCH evidence requires 1500 ticks and rejects malformed input', () {
+    expect(minimumMatchesHistory, 1500);
+    expect(() => evaluateDigits(List<int>.filled(249, 1), PredictionMode.matches, 5), throwsArgumentError);
+    expect(() => evaluateDigits([...List<int>.filled(249, 1), 10], PredictionMode.matches, 5), throwsArgumentError);
+    expect(needsEvaluation(50, 100), isTrue);
+  });
+
   test('MATCHES gate abstains on weak or insufficient evidence', () {
     expect(matchesSignalAllowed(testCount: 221, testAccuracy: .081), isFalse);
     expect(matchesSignalAllowed(testCount: 50, testAccuracy: .9), isFalse);
