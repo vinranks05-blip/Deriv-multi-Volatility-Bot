@@ -114,13 +114,15 @@ extension _DashboardViews on _DashboardState {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   _pill(
                     ledger.enabled ? 'PAPER RUNNING' : 'PAPER STOPPED',
                     color: ledger.enabled ? green : Colors.orange,
                   ),
-                  const Spacer(),
                   if (ledger.enabled)
                     TextButton(
                       onPressed: () {
