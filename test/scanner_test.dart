@@ -45,7 +45,7 @@ class FakeMarketData extends V13MarketData {
 
 void main() {
   testWidgets(
-      'canonical app scores Under on the next live tick and stores its barrier',
+      'canonical app abstains when Under score fails the configured threshold',
       (tester) async {
     SharedPreferences.setMockInitialValues({});
     final data = FakeMarketData();
@@ -56,15 +56,12 @@ void main() {
     data.seed();
     await tester.pump();
     await tester.pump(const Duration(seconds: 10));
-    expect(find.text('NEXT TICK • UNDER 5'), findsOneWidget);
+    // Constant-digit synthetic history must not force an unqualified signal.
+    expect(storage.events, isEmpty);
     data.emit(301);
     await tester.pump();
     await tester.pump();
-    final snapshots = storage.events.map((e) => e['record'] as Map).toList();
-    expect(snapshots.first['observation'], 'pending');
-    expect(snapshots.last['observation'], 'correct');
-    expect(snapshots.last['mode'], 3);
-    expect(snapshots.last['digit'], 5);
+    expect(storage.events, isEmpty);
     await tester.pumpWidget(const SizedBox());
     await tester.pump();
     expect(tester.takeException(), isNull);
