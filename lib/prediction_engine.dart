@@ -297,3 +297,23 @@ class ForwardAccuracy {
   double? get accuracy => observations == 0 ? null : wins / observations;
   bool get sufficientSample => observations >= 300;
 }
+
+/// Human-readable explanation for MATCH abstention. Never presents a
+/// historical test result as a verified live trading advantage.
+String matchesAbstentionReason({
+  required int testCount,
+  required double testAccuracy,
+  int minimumObservations = 300,
+}) {
+  if (testCount < minimumObservations) {
+    return 'Insufficient held-out ticks: $testCount/$minimumObservations';
+  }
+  if (!testAccuracy.isFinite || testAccuracy < 0 || testAccuracy > 1) {
+    return 'Invalid held-out accuracy';
+  }
+  if (!matchesSignalAllowed(testCount: testCount,
+      testAccuracy: testAccuracy, minimumObservations: minimumObservations)) {
+    return 'No statistically supported MATCH advantage over 10%';
+  }
+  return 'Held-out gate passed; forward performance remains unverified';
+}

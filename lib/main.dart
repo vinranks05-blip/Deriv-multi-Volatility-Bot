@@ -364,6 +364,16 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
     );
     final choice = chooseDigit(probabilities, mode, barrier);
     m.eligible++;
+    if (mode == PredictionMode.matches &&
+        !matchesSignalAllowed(
+          testCount: m.testCount,
+          testAccuracy: m.holdout / 100,
+        )) {
+      m.abstained++;
+      m.phase = matchesAbstentionReason(
+        testCount: m.testCount, testAccuracy: m.holdout / 100);
+      return;
+    }
     if (choice.score < confidenceThreshold) {
       m.abstained++;
       m.phase = 'No signal: below score threshold';
@@ -885,11 +895,17 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
               Text(
                 'Final historical test: ${evaluated ? m.testCount : 0} ticks',
               ),
+              if (mode == PredictionMode.matches && evaluated)
+                Text('MATCH eligibility: ${matchesAbstentionReason(testCount: m.testCount, testAccuracy: m.holdout / 100)}'),
+              Text('Scanner status: ${m.phase}'),
+              Text('Paper: ${ledger.enabled ? 'enabled' : 'disabled'} • Market: ${ledger.config.symbol} • Condition: ${ledger.config.condition}'),
+              if (m.forecast != null)
+                Text('Paper decision: ${m.forecast!.paper} • ${m.forecast!.reason.isEmpty ? 'No rejection reason' : m.forecast!.reason}'),
               Text(
                 'Digit log loss: ${m.logLoss.toStringAsFixed(3)} • Brier: ${m.brier.toStringAsFixed(3)}',
               ),
               const Text(
-                'No demonstrated predictive edge',
+                'MATCHES signals require a statistically supported held-out edge',
                 style: TextStyle(color: Colors.amber),
               ),
               Text(

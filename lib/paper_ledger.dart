@@ -307,7 +307,20 @@ class PaperLedger {
     for (final r in active.where((r) => r.symbol == symbol)) {
       if (sequence <= r.sourceSequence || epoch < r.sourceEpoch) continue;
       var changed = false;
-      if (r.observation == 'pending') {
+      if (r.observation == 'pending' && sequence > r.sourceSequence + 1) {
+        r.observation = 'interrupted';
+        r.reason = 'Missed immediate next tick';
+        changed = true;
+      }
+      if (r.observation == 'pending' &&
+          isNextTickObservation(
+            forecastSymbol: r.symbol,
+            observedSymbol: symbol,
+            sourceSequence: r.sourceSequence,
+            observedSequence: sequence,
+            sourceEpoch: r.sourceEpoch,
+            observedEpoch: epoch,
+          )) {
         r.actual = digit;
         r.observationEpoch = epoch;
         r.observation = digitWins(r.mode, r.digit, digit)
