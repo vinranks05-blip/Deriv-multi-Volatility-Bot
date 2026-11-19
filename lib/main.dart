@@ -370,8 +370,10 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
           testAccuracy: m.holdout / 100,
         )) {
       m.abstained++;
-      m.phase = matchesAbstentionReason(
-        testCount: m.testCount, testAccuracy: m.holdout / 100);
+      m.phase = m.ticks.length < minimumMatchesHistory
+          ? 'Collecting MATCH evidence: ${m.ticks.length}/$minimumMatchesHistory ticks'
+          : matchesAbstentionReason(
+              testCount: m.testCount, testAccuracy: m.holdout / 100); 
       return;
     }
     if (choice.score < confidenceThreshold) {

@@ -80,7 +80,7 @@ class DigitModel {
 
   factory DigitModel.trainML(List<int> training) {
     final w = List.generate(10, (_) => List<double>.filled(31, 0));
-    for (var pass = 0; pass < 5; pass++) {
+    for (var pass = 0; pass < 3; pass++) {
       for (var i = 50; i < training.length - 1; i++) {
         final x = _features(training, i);
         final p = _softmax(w, x);
@@ -191,6 +191,9 @@ ModelEvaluation evaluateDigits(
   int barrier,
 ) {
   if (all.length < 250) throw ArgumentError('Need at least 250 ticks');
+  if (all.any((digit) => digit < 0 || digit > 9)) {
+    throw ArgumentError('Tick digits must be between 0 and 9');
+  }
   final xs = all.skip(max(0, all.length - 2000)).toList();
   final trainEnd = (xs.length * .6).floor();
   final testStart = (xs.length * .8).floor();
@@ -252,7 +255,13 @@ ModelEvaluation evaluateDigits(
 }
 
 bool needsEvaluation(int tickSequence, int? previousSequence) =>
-    previousSequence == null || tickSequence - previousSequence >= 100;
+    previousSequence == null ||
+    tickSequence < previousSequence ||
+    tickSequence - previousSequence >= 100;
+
+/// The final holdout is 20% of the last 2,000 ticks. MATCHES needs
+/// 300 independent holdout labels before the statistical gate can open.
+const int minimumMatchesHistory = 1500;
 
 /// Conservative MATCHES eligibility check. A high model score alone is not
 /// evidence of predictive advantage; use held-out outcomes and uncertainty.
