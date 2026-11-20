@@ -686,11 +686,14 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
               Row(children: [
                 const Icon(Icons.bolt, color: green, size: 19),
                 const SizedBox(width: 6),
-                Text(
-                  markets.any((m) => m.forecast != null)
-                      ? 'VALIDATED SIGNALS'
-                      : 'WAITING FOR VALIDATED ENTRY',
-                  style: const TextStyle(color: green, fontWeight: FontWeight.bold),
+                Expanded(
+                  child: Text(
+                    markets.any((m) => m.forecast != null)
+                        ? 'VALIDATED SIGNALS'
+                        : 'WAITING FOR VALIDATED ENTRY',
+                    softWrap: true,
+                    style: const TextStyle(color: green, fontWeight: FontWeight.bold),
+                  ),
                 ),
               ]),
               const SizedBox(height: 5),
@@ -705,8 +708,15 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
                   padding: const EdgeInsets.symmetric(vertical: 4),
                   child: Row(children: [
                     Expanded(child: Text(m.name, style: const TextStyle(fontWeight: FontWeight.w600))),
-                    Text('DIGIT ${m.forecast!.digit}  •  ${m.forecast!.score.toStringAsFixed(0)}% model score',
-                      style: const TextStyle(color: green, fontSize: 12)),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        'DIGIT ${m.forecast!.digit}  •  ${m.forecast!.score.toStringAsFixed(0)}% model score',
+                        textAlign: TextAlign.end,
+                        softWrap: true,
+                        style: const TextStyle(color: green, fontSize: 12),
+                      ),
+                    ),
                   ]),
                 ),
               if (!markets.any((m) => m.forecast != null))
