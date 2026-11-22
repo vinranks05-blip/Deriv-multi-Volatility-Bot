@@ -10,6 +10,7 @@ import 'ledger_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'deriv_v13_market_data.dart';
 import 'prediction_engine.dart';
+import 'market_ranker.dart';
 
 void main() => runApp(const V70App());
 const bg = Color(0xff030d26), panel = Color(0xff10234b);
@@ -501,6 +502,20 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
       ),
     ),
   );
+  // Forward-only MATCH observations; no broker payout is inferred.
+  // The ranker must abstain until a verified payout quote is available.
+  List<RankedMarket> _matchMarketScreen() => MarketRanker.evaluate([
+    for (final m in markets)
+      MarketCandidate(
+        market: m.symbol,
+        contract: 'MATCH',
+        wins: m.watchWins,
+        observations: m.watchCount,
+        baselineProbability: 0.1,
+        netProfitPerUnitStake: null,
+      ),
+  ]);
+
   Widget _marketCard(Market m) {
     final f = m.forecast;
     final condition = f == null
@@ -772,6 +787,19 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
                         style: const TextStyle(color: Colors.amber, fontSize: 12),
                       )),
                     ]),
+                  ),
+                const SizedBox(height: 10),
+                const Text('V70 MARKET SCREEN • forward MATCH evidence',
+                  style: TextStyle(color: cyan, fontWeight: FontWeight.bold)),
+                const Text('Read-only. No verified payout quotes; no market is authorized for trading.',
+                  style: TextStyle(fontSize: 11, color: Colors.white70)),
+                for (final ranked in _matchMarketScreen())
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Text(
+                      '${ranked.candidate.market}: ${ranked.candidate.wins}/${ranked.candidate.observations} correct • ${ranked.reason}',
+                      style: const TextStyle(fontSize: 11, color: Colors.white70),
+                    ),
                   ),
                 Text('Watch next-tick results: ${markets.fold<int>(0, (n, m) => n + m.watchWins)}/${markets.fold<int>(0, (n, m) => n + m.watchCount)} correct • 10% random-digit baseline',
                   style: const TextStyle(fontSize: 12, color: Colors.white70)),
