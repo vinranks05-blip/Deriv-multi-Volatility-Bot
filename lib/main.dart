@@ -791,13 +791,13 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
                 const SizedBox(height: 10),
                 const Text('V70 MARKET SCREEN • forward MATCH evidence',
                   style: TextStyle(color: cyan, fontWeight: FontWeight.bold)),
-                const Text('Read-only. No verified payout quotes; no market is authorized for trading.',
+                const Text('Ranked by verified evidence only. Live MATCH results are recorded, but broker payout quotes are unavailable; all markets remain ineligible.',
                   style: TextStyle(fontSize: 11, color: Colors.white70)),
                 for (final ranked in _matchMarketScreen())
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 3),
                     child: Text(
-                      '${ranked.candidate.market}: ${ranked.candidate.wins}/${ranked.candidate.observations} correct • ${ranked.reason}',
+                      '${ranked.candidate.market} • MATCH: ${ranked.candidate.wins}/${ranked.candidate.observations} forward hits • ${ranked.reason}',
                       style: const TextStyle(fontSize: 11, color: Colors.white70),
                     ),
                   ),
