@@ -1,7 +1,7 @@
 name: v11_expert_trader
 description: Experimental read-only Deriv volatility digit scanner
 publish_to: none
-version: 15.7.1+1
+version: 16.0.0+3
 environment:
   sdk: '>=3.9.0 <4.0.0'
   flutter: '>=3.35.0'
