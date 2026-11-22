@@ -54,6 +54,12 @@ class Market {
   DigitModel model = const DigitModel(0);
   int? matchWatchDigit;
   double? matchWatchProbability;
+  int? watchSourceSequence, watchSourceEpoch, watchPendingDigit;
+  final List<bool> watchOutcomes = [];
+  int watchWins = 0;
+  int get watchCount => watchOutcomes.length;
+  double? get watchAccuracy => watchCount == 0 ? null : watchWins / watchCount;
+
   bool get live =>
       lastSeen != null && DateTime.now().difference(lastSeen!).inSeconds < 15;
   int? get lastDigit => ticks.isEmpty ? null : ticks.last.lastDigit;
@@ -261,10 +267,29 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
         DateTime.now().difference(m.lastSeen!).inSeconds >= 15) {
       ledger.interrupt('Feed gap', symbol: m.symbol);
       m.forecast = null;
+      m.watchPendingDigit = null; // Never score a prediction across a feed gap.
     }
     m.lastSeen = DateTime.now();
     m.tickSequence++;
     tickCount++;
+    if (m.watchPendingDigit != null) {
+      if (isNextTickObservation(
+        forecastSymbol: m.symbol,
+        observedSymbol: tick.symbol,
+        sourceSequence: m.watchSourceSequence!,
+        observedSequence: m.tickSequence,
+        sourceEpoch: m.watchSourceEpoch!,
+        observedEpoch: tick.epoch,
+      )) {
+        final correct = m.watchPendingDigit == tick.lastDigit;
+        m.watchOutcomes.add(correct);
+        if (correct) m.watchWins++;
+        if (m.watchOutcomes.length > 1000) {
+          if (m.watchOutcomes.removeAt(0)) m.watchWins--;
+        }
+      }
+      m.watchPendingDigit = null;
+    }
     if (tickCount % 5 == 0) _indicators(m);
     if (ledgerReady) {
       ledger.tick(
@@ -369,6 +394,11 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
     final matchWatch = chooseDigit(probabilities, PredictionMode.matches, barrier);
     m.matchWatchDigit = matchWatch.digit;
     m.matchWatchProbability = matchWatch.score;
+    if (mode == PredictionMode.matches) {
+      m.watchPendingDigit = matchWatch.digit;
+      m.watchSourceSequence = m.tickSequence;
+      m.watchSourceEpoch = m.ticks.last.epoch;
+    }
     final choice = chooseDigit(probabilities, mode, barrier);
     m.eligible++;
     if (mode == PredictionMode.matches &&
@@ -726,6 +756,27 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
                     ),
                   ]),
                 ),
+              if (mode == PredictionMode.matches) ...[
+                const SizedBox(height: 8),
+                const Text('MATCH WATCH • next-tick estimates, not trade signals',
+                  style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold)),
+                for (final m in markets.where((m) => m.live))
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(children: [
+                      Expanded(child: Text(m.name, style: const TextStyle(fontSize: 12))),
+                      Flexible(child: Text(
+                        m.matchWatchDigit == null
+                            ? 'Collecting ${m.ticks.length}/250'
+                            : 'DIGIT ${m.matchWatchDigit} • ${(100 * m.matchWatchProbability!).toStringAsFixed(1)}% score',
+                        textAlign: TextAlign.end,
+                        style: const TextStyle(color: Colors.amber, fontSize: 12),
+                      )),
+                    ]),
+                  ),
+                Text('Watch next-tick results: ${markets.fold<int>(0, (n, m) => n + m.watchWins)}/${markets.fold<int>(0, (n, m) => n + m.watchCount)} correct • 10% random-digit baseline',
+                  style: const TextStyle(fontSize: 12, color: Colors.white70)),
+              ],
               if (!markets.any((m) => m.forecast != null))
                 Text('Next scan in ${scanRemaining}s • No trade signal issued',
                   style: const TextStyle(color: Colors.white70, fontSize: 12)),
@@ -947,6 +998,8 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
                       : 'MATCH watch (not a trade signal): ${m.matchWatchDigit} • estimated ${(100 * m.matchWatchProbability!).toStringAsFixed(1)}%',
                   style: const TextStyle(color: Colors.amber),
                 ),
+              if (mode == PredictionMode.matches)
+                Text('MATCH watch forward accuracy: ${m.watchAccuracy == null ? '—' : '${(100 * m.watchAccuracy!).toStringAsFixed(1)}%'} (${m.watchCount} next-tick observations; rolling max 1000)'),
               Text('Model: ${evaluated ? m.method : 'awaiting evaluation'}'),
               Text(
                 'Estimate (uncalibrated): ${m.forecast == null ? '—' : '${m.forecast!.score.toStringAsFixed(1)}%'}',
