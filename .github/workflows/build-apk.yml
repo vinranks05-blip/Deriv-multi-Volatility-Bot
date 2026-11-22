@@ -30,6 +30,23 @@ jobs:
       - name: Generate Android project
         run: flutter create --empty --no-pub --platforms=android --project-name v11_expert_trader .
 
+      - name: Pin compatible Kotlin Gradle plugin
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          settings = Path('android/settings.gradle.kts')
+          if not settings.exists():
+              raise SystemExit('Generated Android settings.gradle.kts is missing')
+          source = settings.read_text()
+          pattern = r'(id\(["\']org\.jetbrains\.kotlin\.android["\']\)\s+version\s+["\'])[^"\']+(["\'])'
+          updated, count = re.subn(pattern, lambda m: m.group(1) + '2.2.20' + m.group(2), source)
+          if count != 1:
+              raise SystemExit(f'Expected one Kotlin Android plugin declaration, found {count}')
+          settings.write_text(updated)
+          print('Pinned generated Kotlin Android Gradle plugin to 2.2.20')
+          PYCODE
+
       - name: Ensure Android internet permission
         run: |
           python3 - <<'PY'
