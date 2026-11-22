@@ -52,6 +52,8 @@ class Market {
   int? lastEvaluationSequence;
   int evaluatedStrategy = -1, evaluatedBarrier = -1;
   DigitModel model = const DigitModel(0);
+  int? matchWatchDigit;
+  double? matchWatchProbability;
   bool get live =>
       lastSeen != null && DateTime.now().difference(lastSeen!).inSeconds < 15;
   int? get lastDigit => ticks.isEmpty ? null : ticks.last.lastDigit;
@@ -362,6 +364,11 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
     final probabilities = m.model.probabilities(
       m.ticks.map((t) => t.lastDigit).toList(),
     );
+    // Show the MATCH estimate even when the evidence gate correctly abstains.
+    // A watch estimate is NOT an eligible trading signal.
+    final matchWatch = chooseDigit(probabilities, PredictionMode.matches, barrier);
+    m.matchWatchDigit = matchWatch.digit;
+    m.matchWatchProbability = matchWatch.score;
     final choice = chooseDigit(probabilities, mode, barrier);
     m.eligible++;
     if (mode == PredictionMode.matches &&
@@ -933,6 +940,13 @@ class _DashboardState extends State<Dashboard> with WidgetsBindingObserver {
               Text(
                 'Forecast condition: ${m.forecast == null ? '—' : modes[m.forecast!.mode.index]} ${m.forecast?.digit ?? ''}',
               ),
+              if (mode == PredictionMode.matches)
+                Text(
+                  m.matchWatchDigit == null
+                      ? 'MATCH watch: waiting for live model evaluation'
+                      : 'MATCH watch (not a trade signal): ${m.matchWatchDigit} • estimated ${(100 * m.matchWatchProbability!).toStringAsFixed(1)}%',
+                  style: const TextStyle(color: Colors.amber),
+                ),
               Text('Model: ${evaluated ? m.method : 'awaiting evaluation'}'),
               Text(
                 'Estimate (uncalibrated): ${m.forecast == null ? '—' : '${m.forecast!.score.toStringAsFixed(1)}%'}',
